@@ -1,7 +1,11 @@
 import os
 import datetime
+import json
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
-# compute today’s ISO date once:
+# compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
 
 import urllib.parse
@@ -61,6 +65,12 @@ FILES_DIR = os.path.normpath(
     r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE"
 )
 
+# PDF search cache configuration
+PDF_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".pdf_cache")
+PDF_CACHE_FILE = os.path.join(PDF_CACHE_DIR, "pdf_text_cache.json")
+MAX_PAGES_TO_SCAN = 10  # Only scan first N pages for faster search
+MAX_WORKERS = 4  # Number of parallel PDF processors
+
 # Two user credentials
 CREDENTIALS = {
     "jlu":      {"password": "jlu25%^&",    "greeting": "Hello James,"},
@@ -82,16 +92,22 @@ TITLE_COLOR       = "#004080"
 ############################
 
 def get_category_options():
+    """Build sorted list of all categories with file counts."""
     # build a sorted list of all categories + "Others"
     categories = sorted(set(PREFIX_MAP.values()) | {"Others"})
     counts = {cat: 0 for cat in categories}
 
-    # scan your FILES_DIR
-    for fname in os.listdir(FILES_DIR):
-        if not fname.lower().endswith(".pdf") or fname == "README.txt":
-            continue
-        cat = detect_category(fname)
-        counts[cat] += 1
+    # scan your FILES_DIR with error handling
+    try:
+        if os.path.isdir(FILES_DIR):
+            for fname in os.listdir(FILES_DIR):
+                if not fname.lower().endswith(".pdf") or fname == "README.txt":
+                    continue
+                cat = detect_category(fname)
+                counts[cat] += 1
+    except Exception as e:
+        # If directory scan fails, return empty counts but still show categories
+        print(f"Warning: Could not scan FILES_DIR: {e}")
 
     return [
         {"label": f"{cat} ({counts[cat]})", "value": cat}
@@ -99,22 +115,129 @@ def get_category_options():
     ]
 
 # ── 0b) Precompute sorted category options with "Others" last ──
-_raw_opts = get_category_options()
-_base = sorted([o for o in _raw_opts if o["value"] != "Others"],
-               key=lambda o: o["label"])
-_others = [o for o in _raw_opts if o["value"] == "Others"]
-CATEGORY_OPTIONS = _base + _others
+try:
+    _raw_opts = get_category_options()
+    _base = sorted([o for o in _raw_opts if o["value"] != "Others"],
+                   key=lambda o: o["label"])
+    _others = [o for o in _raw_opts if o["value"] == "Others"]
+    CATEGORY_OPTIONS = _base + _others
+except Exception as e:
+    # Fallback to basic category list if initialization fails
+    print(f"Warning: Could not initialize category options: {e}")
+    CATEGORY_OPTIONS = [
+        {"label": f"{cat} (0)", "value": cat}
+        for cat in sorted(set(PREFIX_MAP.values()) | {"Others"})
+    ]
 
-def pdf_contains(filepath: str, term_lower: str) -> bool:
+def _extract_pdf_text(filepath: str, max_pages: int = MAX_PAGES_TO_SCAN) -> str:
+    """Extract text from first N pages of PDF."""
     try:
         reader = PdfReader(filepath)
-        for page in reader.pages:
+        text_parts = []
+        for i, page in enumerate(reader.pages):
+            if i >= max_pages:
+                break
             text = page.extract_text() or ""
-            if term_lower in text.lower():
-                return True
+            text_parts.append(text)
+        return " ".join(text_parts).lower()
+    except Exception as e:
+        print(f"Error extracting text from {filepath}: {e}")
+        return ""
+
+
+def _get_file_hash(filepath: str) -> str:
+    """Get file modification time hash for cache invalidation."""
+    try:
+        mtime = os.path.getmtime(filepath)
+        size = os.path.getsize(filepath)
+        return hashlib.md5(f"{filepath}_{mtime}_{size}".encode()).hexdigest()
     except Exception:
-        pass
+        return ""
+
+
+def _load_pdf_cache() -> dict:
+    """Load PDF text cache from disk."""
+    try:
+        if os.path.exists(PDF_CACHE_FILE):
+            with open(PDF_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Warning: Could not load PDF cache: {e}")
+    return {}
+
+
+def _save_pdf_cache(cache: dict) -> None:
+    """Save PDF text cache to disk."""
+    try:
+        os.makedirs(PDF_CACHE_DIR, exist_ok=True)
+        with open(PDF_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save PDF cache: {e}")
+
+
+@lru_cache(maxsize=1)
+def _get_cache() -> dict:
+    """Get cached PDF text with file-level caching."""
+    return _load_pdf_cache()
+
+
+def pdf_contains_cached(filepath: str, term_lower: str) -> bool:
+    """Check if PDF contains term using cached text extraction."""
+    cache = _get_cache()
+    file_hash = _get_file_hash(filepath)
+    
+    # Check if we have cached text for this file
+    cache_key = os.path.normpath(filepath)
+    cached_entry = cache.get(cache_key)
+    
+    if cached_entry and cached_entry.get('hash') == file_hash:
+        # Use cached text
+        cached_text = cached_entry.get('text', '')
+        return term_lower in cached_text
+    else:
+        # Extract and cache text
+        text = _extract_pdf_text(filepath)
+        if text:
+            cache[cache_key] = {'hash': file_hash, 'text': text}
+            _save_pdf_cache(cache)
+            _get_cache.cache_clear()  # Clear LRU cache to reload
+            return term_lower in text
     return False
+
+
+def pdf_contains_batch(filepaths: list, term_lower: str) -> dict:
+    """Check multiple PDFs in parallel for term presence."""
+    results = {}
+    total = len(filepaths)
+    
+    def check_single_pdf(filepath: str) -> tuple[str, bool]:
+        return filepath, pdf_contains_cached(filepath, term_lower)
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_file = {executor.submit(check_single_pdf, fp): fp for fp in filepaths}
+        completed = 0
+        for future in as_completed(future_to_file):
+            try:
+                filepath, found = future.result()
+                results[filepath] = found
+                completed += 1
+                # Log progress (can be used for future real-time updates)
+                if completed % max(1, total // 10) == 0 or completed == total:
+                    print(f"PDF search progress: {completed}/{total} files ({100*completed//total}%)")
+            except Exception as e:
+                filepath = future_to_file[future]
+                print(f"Error processing {filepath}: {e}")
+                results[filepath] = False
+                completed += 1
+    
+    return results
+
+
+# Legacy function for backwards compatibility
+def pdf_contains(filepath: str, term_lower: str) -> bool:
+    """Legacy wrapper - use pdf_contains_cached for better performance."""
+    return pdf_contains_cached(filepath, term_lower)
 
 ############################
 # 3) INITIALIZE APP
@@ -231,17 +354,29 @@ files_layout = html.Div(
                     },
                 ),
 
-                # Progress bar
+                # Progress bar with file count
                 html.Div(
-                    className="progress flex-grow-1",
                     id="progress-container",
-                    style={"visibility": "hidden", "height": "8px"},
+                    style={"visibility": "hidden", "marginBottom": "10px"},
                     children=[
                         html.Div(
-                            className="progress-bar progress-bar-striped progress-bar-animated",
-                            role="progressbar",
-                            style={"width": "100%"},
-                        )
+                            id="progress-text",
+                            style={"textAlign": "center", "marginBottom": "5px", "fontSize": "14px", "color": "#666"},
+                            children=""
+                        ),
+                        html.Div(
+                            className="progress",
+                            style={"height": "25px"},
+                            children=[
+                                html.Div(
+                                    id="progress-bar",
+                                    className="progress-bar progress-bar-striped progress-bar-animated",
+                                    role="progressbar",
+                                    style={"width": "0%", "transition": "width 0.3s ease"},
+                                    children="0%"
+                                )
+                            ],
+                        ),
                     ],
                 ),
             ],
@@ -485,6 +620,9 @@ def clear_content_and_search(n_clear, n_search):
         Output("files-table", "columns"),
         Output("files-table", "data"),
         Output("progress-container", "style"),
+        Output("progress-text", "children"),
+        Output("progress-bar", "style"),
+        Output("progress-bar", "children"),
     ],
     [
         Input("box-dropdown",         "value"),
@@ -537,8 +675,8 @@ def update_file_table(
         cols.insert(4, {"id": "subject",  "name": "Subject",  "type": "text"})
         cols.append({"id": "download","name": "Download","presentation": "markdown"})
 
-    # 3) Scan directories
-    rows = []
+    # 3) Scan directories and collect candidate files
+    candidate_files = []
     scan = [(FILES_DIR, "General")]
     if login_user == "iwill":
         scan.append((SC, "Small Caps"))
@@ -587,29 +725,71 @@ def update_file_table(
             fmap = {"y":"Yearly","q":"Quarterly","m":"Monthly","w":"Weekly","u":""}
             frequency = fmap.get(fcode.lower(), "unknown")
 
-            # title/content search filters
+            # title search filter
             if tt and tt not in title_str.lower():
                 continue
-            if ct and not pdf_contains(os.path.join(dpath, fname), ct):
-                continue
+            
+            # Collect file info for batch PDF search
+            full_path = os.path.join(dpath, fname)
+            candidate_files.append({
+                'path': full_path,
+                'fname': fname,
+                'category': category,
+                'title_str': title_str,
+                'date_fmt': date_fmt,
+                'is_today': is_today,
+                'frequency': frequency,
+                'subj': subj
+            })
 
-            # build the single row (with is_today flag)
-            safe = urllib.parse.quote(fname)
-            view_md = f"[View](/view?file={safe})"
-            row = {
-                "firm":      category,
-                "frequency": frequency,
-                "date":      date_fmt,
-                "title":     title_str,
-                "view":      view_md,
-                "is_today":  is_today
-            }
-            if login_user == "iwill":
-                row["subject"]  = subj
-                row["download"] = f"[Download](/download?file={safe})"
+    # Batch process PDF content search if needed
+    if ct and candidate_files:
+        # Show progress bar with file count
+        total_files = len(candidate_files)
+        progress_style = {"visibility": "visible", "marginBottom": "10px"}
+        progress_text = f"Searching PDF content in {total_files} file{'s' if total_files != 1 else ''}..."
+        progress_bar_style = {"width": "0%", "transition": "width 0.3s ease", "backgroundColor": "#007bff"}
+        progress_bar_text = "Starting..."
+        
+        # Process PDFs in batch
+        pdf_paths = [f['path'] for f in candidate_files]
+        pdf_results = pdf_contains_batch(pdf_paths, ct)
+        
+        # Update progress to 100% after completion
+        matches_found = sum(1 for v in pdf_results.values() if v)
+        progress_bar_style = {"width": "100%", "transition": "width 0.3s ease", "backgroundColor": "#28a745"}
+        progress_bar_text = "100%"
+        progress_text = f"Search complete! Found {matches_found} matching file{'s' if matches_found != 1 else ''} out of {total_files}"
+    else:
+        pdf_results = {}
+        progress_style = {"visibility": "hidden", "marginBottom": "10px"}
+        progress_text = ""
+        progress_bar_style = {"width": "0%", "transition": "width 0.3s ease"}
+        progress_bar_text = "0%"
 
-            rows.append(row)
+    # Build rows from filtered candidates
+    rows = []
+    for file_info in candidate_files:
+        # Skip if PDF content search failed
+        if ct and not pdf_results.get(file_info['path'], False):
+            continue
+        
+        # build the single row (with is_today flag)
+        safe = urllib.parse.quote(file_info['fname'])
+        view_md = f"[View](/view?file={safe})"
+        row = {
+            "firm":      file_info['category'],
+            "frequency": file_info['frequency'],
+            "date":      file_info['date_fmt'],
+            "title":     file_info['title_str'],
+            "view":      view_md,
+            "is_today":  file_info['is_today']
+        }
+        if login_user == "iwill":
+            row["subject"]  = file_info['subj']
+            row["download"] = f"[Download](/download?file={safe})"
 
+        rows.append(row)
 
     # Sort rows by date (most recent first), ignoring "Unknown"
     def sort_key(r):
@@ -620,9 +800,14 @@ def update_file_table(
 
     rows.sort(key=sort_key, reverse=True)
 
-    # hide progress bar
-    style = {"visibility": "hidden", "height": "8px"}
-    return cols, rows, style
+    # Return progress info (already set above if PDF search was performed)
+    if not ct or not candidate_files:
+        progress_style = {"visibility": "hidden", "marginBottom": "10px"}
+        progress_text = ""
+        progress_bar_style = {"width": "0%", "transition": "width 0.3s ease"}
+        progress_bar_text = "0%"
+    
+    return cols, rows, progress_style, progress_text, progress_bar_style, progress_bar_text
 
 
 ############################
@@ -632,6 +817,7 @@ def update_file_table(
 @app.callback(
     Output('login-message','children'),
     Output('main-section','style'),
+    Output('login-section','style'),
     Output('greeting','children'),
     Output('login-status','data'),
     Output('login-user','data'),         
@@ -640,16 +826,26 @@ def update_file_table(
     Input('logout-button','n_clicks'),
     State('login-username','value'),
     State('login-password','value'),
+    State('login-status','data'),
     prevent_initial_call=True
 )
 
 def handle_login_logout(login_clicks, pw_enter, logout_clicks,
-                        username, password):
+                        username, password, login_status):
+    """Handle login and logout actions."""
     triggered = ctx.triggered_id
 
     # Logout
     if triggered == "logout-button":
-        return "", {'display':'none','opacity':'0'}, "", False, ""
+        return (
+            "",
+            {'display':'none','opacity':'0'},
+            {'display':'flex','flexDirection':'column','alignItems':'center',
+             'justifyContent':'center','height':'100vh'},
+            "",
+            False,
+            ""
+        )
 
     # Validate
     success = username in CREDENTIALS and password == CREDENTIALS[username]['password']
@@ -657,7 +853,7 @@ def handle_login_logout(login_clicks, pw_enter, logout_clicks,
 
     # Log attempt
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ip = request.remote_addr
+    ip = request.remote_addr if request else "unknown"
     status = "SUCCESS" if success else "FAIL"
     try:
         with open(LOG_FILE,'a') as f:
@@ -667,19 +863,22 @@ def handle_login_logout(login_clicks, pw_enter, logout_clicks,
 
     if success:
         return (
-            "", 
+            "",
             {'display':'block','opacity':'1','transition':'opacity 0.8s'},
+            {'display':'none'},
             greeting,
             True,
-            username         # ← add this
+            username
         )
     else:
         return (
             "Invalid credentials.",
             {'display':'none','opacity':'0'},
+            {'display':'flex','flexDirection':'column','alignItems':'center',
+             'justifyContent':'center','height':'100vh'},
             "",
             False,
-            ""               # ← add this
+            ""
         )
 
 
@@ -752,5 +951,5 @@ def download_file():
 ############################
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8065)
+    app.run(debug=True, port=8065, host='127.0.0.1')
 
