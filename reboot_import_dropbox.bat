@@ -1,41 +1,40 @@
 @echo off
 REM ─────────────────────────────────────────────────────────────────────────────
 REM reboot_import_dropbox.bat
-REM Launches import_dropbox.py using Streamlit from within .venv13
+REM Launches import_dropbox.py using Streamlit from within TWIFO_Sharing's .venv13
 REM Must be run from the folder where this .bat lives.
 REM ─────────────────────────────────────────────────────────────────────────────
 
-REM 1) Jump to the folder containing this script (handles spaces in path)
-pushd "%~dp0"
+REM ─── Configuration ─────────────────────────────────────────────
+REM Use TWIFO_Sharing's own venv instead of HomePage's venv
+set "PROJECT_ROOT=C:\Program Files\Coding Projects\TWIFO_Sharing"
+set "VENV=%PROJECT_ROOT%\.venv13"
+set "PY=%VENV%\Scripts\python.exe"
+set "STREAMLIT=%VENV%\Scripts\streamlit.exe"
 
-REM 2) Verify the virtual‑env activation script exists
-if not exist ".venv13\Scripts\activate.bat" (
-    echo [ERROR] Virtual environment activation script not found!
-    echo Looking for: %~dp0.venv13\Scripts\activate.bat
-    pause
-    popd
-    exit /b 1
+REM ─── Sanity check ──────────────────────────────────────────────
+if not exist "%PY%" (
+  echo ERROR: Could not find Python at "%PY%".
+  echo Did you create your .venv13 in %PROJECT_ROOT%?
+  pause
+  exit /b 1
 )
 
-REM 3) Activate the venv
-echo [INFO] Activating .venv13...
-call ".venv13\Scripts\activate.bat"
-if errorlevel 1 (
-    echo [ERROR] Failed to activate .venv13.
-    pause
-    popd
-    exit /b 1
+if not exist "%STREAMLIT%" (
+  echo ERROR: Could not find Streamlit at "%STREAMLIT%".
+  echo Please install streamlit in the venv: pip install streamlit
+  pause
+  exit /b 1
 )
 
-REM 4) Launch via Streamlit (not python)
+REM ─── Switch to TWIFO_Sharing folder ───────────────────────────
+cd /d "%~dp0"
+
+REM ─── Launch via Streamlit using venv's python ─────────────────
 echo [INFO] Starting import_dropbox.py with Streamlit...
-streamlit run import_dropbox.py
+"%STREAMLIT%" run import_dropbox.py
 if errorlevel 1 (
     echo [ERROR] Streamlit exited with an error.
     pause
-    popd
     exit /b 1
 )
-
-REM 5) Return to original directory
-popd

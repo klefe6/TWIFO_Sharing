@@ -5,6 +5,14 @@ import datetime as dt
 from pathlib import Path
 import subprocess
 
+# Import summarization module
+try:
+    from summarize_pdf import summarize_pdf, create_summary_file
+    SUMMARIZE_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Summarization not available: {e}")
+    SUMMARIZE_AVAILABLE = False
+
 # =============================
 # CONFIG — EDIT THESE ONCE
 # =============================
@@ -263,6 +271,19 @@ def main():
             shutil.copy2(src, dst)
             copied += 1
             print(f"[OK] {src} -> {dst.name}")
+            
+            # Generate summary for newly copied files (skip Chart Books)
+            if SUMMARIZE_AVAILABLE:
+                try:
+                    print(f"[INFO] Generating summary for {dst.name}...")
+                    summary = summarize_pdf(dst)
+                    if summary:
+                        summary_file = create_summary_file(dst, summary)
+                        print(f"[OK] Summary created: {summary_file.name}")
+                    else:
+                        print(f"[SKIP] Summary skipped for {dst.name} (Chart Book or other reason)")
+                except Exception as e:
+                    print(f"[WARN] Failed to create summary for {dst.name}: {e}")
         except Exception as e:
             print(f"[ERR] Failed copy: {src} -> {dst} : {e}")
 

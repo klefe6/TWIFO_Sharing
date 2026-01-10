@@ -48,12 +48,59 @@ PREFIX_MAP = {
     "UBS_":   "UBS",
 }
 
+# ── product list & names ──
+PRODUCT_MAP = {
+    "NQ": "Nasdaq 100",
+    "Dow": "Dow Jones",
+    "ES": "E-mini S&P 500",
+    "GC": "Gold",
+    "SI": "Silver",
+    "ZN": "10-Year Note",
+    "BTC": "Bitcoin",
+    "CL": "Crude Oil",
+    "NG": "Natural Gas",
+    "HG": "Copper",
+    "ZC": "Corn",
+    "ZS": "Soybeans",
+    "ZW": "Wheat",
+    "HO": "Heating Oil",
+    "RB": "Gasoline",
+    "RTY": "Russell 2000",
+    "VIX": "Volatility Index",
+    "EUR": "Euro",
+    "GBP": "British Pound",
+    "JPY": "Japanese Yen",
+    "CHF": "Swiss Franc",
+    "AUD": "Australian Dollar",
+    "CAD": "Canadian Dollar",
+    "ZB": "30-Year Bond",
+    "ZF": "5-Year Note",
+    "ZT": "2-Year Note",
+    "TN": "10-Year Ultra",
+    "UB": "Ultra Bond",
+}
+
+PRODUCT_LIST = list(PRODUCT_MAP.keys())
+
 def detect_category(fname: str) -> str:
     """Return the matching category from PREFIX_MAP, or 'Others'."""
     for pfx, cat in PREFIX_MAP.items():
         if fname.startswith(pfx):
             return cat
     return "Others"
+
+
+def detect_products(text: str) -> list[str]:
+    """Return list of product codes found in text (case-insensitive)."""
+    import re
+    text_upper = text.upper()
+    found = []
+    for prod in PRODUCT_LIST:
+        # Match product as whole word (surrounded by word boundaries)
+        pattern = r'\b' + re.escape(prod) + r'\b'
+        if re.search(pattern, text_upper):
+            found.append(prod)
+    return found
 
 
 ############################
@@ -114,7 +161,30 @@ def get_category_options():
         for cat in categories
     ]
 
-# ── 0b) Precompute sorted category options with "Others" last ──
+
+def get_product_options():
+    """Build sorted list of all products with file counts and names."""
+    counts = {prod: 0 for prod in PRODUCT_LIST}
+
+    # scan FILES_DIR for product mentions
+    try:
+        if os.path.isdir(FILES_DIR):
+            for fname in os.listdir(FILES_DIR):
+                if not fname.lower().endswith(".pdf") or fname == "README.txt":
+                    continue
+                # detect products in filename
+                products = detect_products(fname)
+                for prod in products:
+                    counts[prod] += 1
+    except Exception as e:
+        print(f"Warning: Could not scan FILES_DIR for products: {e}")
+
+    return [
+        {"label": f"{prod} - {PRODUCT_MAP[prod]} ({counts[prod]})", "value": prod}
+        for prod in PRODUCT_LIST
+    ]
+
+# ── 0b) Precompute sorted category/product options ──
 try:
     _raw_opts = get_category_options()
     _base = sorted([o for o in _raw_opts if o["value"] != "Others"],
@@ -127,6 +197,15 @@ except Exception as e:
     CATEGORY_OPTIONS = [
         {"label": f"{cat} (0)", "value": cat}
         for cat in sorted(set(PREFIX_MAP.values()) | {"Others"})
+    ]
+
+try:
+    PRODUCT_OPTIONS = get_product_options()
+except Exception as e:
+    print(f"Warning: Could not initialize product options: {e}")
+    PRODUCT_OPTIONS = [
+        {"label": f"{prod} (0)", "value": prod}
+        for prod in PRODUCT_LIST
     ]
 
 def _extract_pdf_text(filepath: str, max_pages: int = MAX_PAGES_TO_SCAN) -> str:
@@ -247,23 +326,61 @@ def has_summary_file(filepath: str) -> tuple[bool, str]:
     
     Note: Returns just the filename (not full path) for URL generation.
     Summary must exist in same directory as source PDF.
+    Checks for both __sum.json (new standard) and .summary.json (legacy) formats.
     """
     if not filepath.endswith('.pdf'):
         return False, ""
     
-    # Build summary path (same directory as source)
+    # Build summary paths (same directory as source)
     base_path = filepath[:-4]  # Remove .pdf extension
-    summary_path = f"{base_path}__sum.pdf"
+    dir_path = os.path.dirname(filepath)
     
-    if os.path.isfile(summary_path):
-        return True, os.path.basename(summary_path)
+    # Check for __sum.json (new standard format)
+    summary_json_new = os.path.join(dir_path, f"{os.path.basename(base_path)}__sum.json")
+    if os.path.isfile(summary_json_new):
+        return True, f"{os.path.basename(base_path)}__sum.json"
     
-    # Future: check for __sum.json
-    # summary_json = f"{base_path}__sum.json"
-    # if os.path.isfile(summary_json):
-    #     return True, os.path.basename(summary_json)
+    # Check for .summary.json (legacy format from test_summarize_one.py)
+    summary_json_legacy = f"{base_path}.summary.json"
+    if os.path.isfile(summary_json_legacy):
+        return True, os.path.basename(summary_json_legacy)
+    
+    # Fallback to PDF format (oldest legacy)
+    summary_pdf = f"{base_path}__sum.pdf"
+    if os.path.isfile(summary_pdf):
+        return True, os.path.basename(summary_pdf)
     
     return False, ""
+
+
+def load_product_categories_from_summary(summary_path: str) -> dict:
+    """
+    Load product categories from summary JSON file.
+    Returns: {"Metals": ["gold", "silver"], "Energy": ["oil"], ...} or empty dict
+    """
+    try:
+        if not os.path.exists(summary_path):
+            return {}
+        
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            summary = json.load(f)
+        
+        # Return product_categories if present
+        return summary.get("product_categories", {})
+    except Exception:
+        return {}
+
+
+def format_product_categories(categories: dict) -> str:
+    """
+    Format product categories dict as display string.
+    Example: {"Metals": ["gold"], "Energy": ["oil"]} -> "Metals, Energy"
+    """
+    if not categories:
+        return "—"
+    
+    category_names = list(categories.keys())
+    return ", ".join(sorted(category_names))
 
 ############################
 # 3) INITIALIZE APP
@@ -285,48 +402,19 @@ files_layout = html.Div(
     style={"backgroundColor": APP_BG_COLOR, "padding": "40px 20px", "minHeight": "100vh"},
     children=[
 
-        # Row 1: Title + Search Bars
-        html.Div(
+        # Title
+        html.H1(
+            APP_TITLE,
             style={
-                "display": "flex",
-                "flexWrap": "wrap",
-                "justifyContent": "center",
-                "gap": "10px",
+                "width": "100%",
+                "textAlign": "center",
+                "color": TITLE_COLOR,
                 "marginBottom": "20px",
+                "fontFamily": "Arial, sans-serif",
             },
-            children=[
-                html.H1(
-                    APP_TITLE,
-                    style={
-                        "width": "100%",
-                        "textAlign": "center",
-                        "color": TITLE_COLOR,
-                        "marginBottom": "10px",
-                        "fontFamily": "Arial, sans-serif",
-                    },
-                ),
-                dcc.Input(
-                    id="title-search-input",
-                    type="text",
-                    placeholder="Search Titles…",
-                    debounce=True,
-                    style={"width": "300px", "padding": "6px"},
-                ),
-                html.Button("×", id="clear-title-search", className="btn btn-link btn-sm"),
-                html.Button("Search", id="title-search-btn", className="btn btn-primary btn-sm"),
-                dcc.Input(
-                    id="content-search-input",
-                    type="text",
-                    placeholder="Search inside PDFs…",
-                    debounce=True,
-                    style={"width": "300px", "padding": "6px"},
-                ),
-                html.Button("×", id="clear-content-search", className="btn btn-link btn-sm"),
-                html.Button("Search", id="content-search-btn", className="btn btn-primary btn-sm"),
-            ],
         ),
 
-        # ── Row 2: Category Filter (3 cols, centered, Others last) ──
+        # ── Row 1: Author/Source Filter (3 cols, Others last) ──
         html.Div(
             style={
                 "display": "flex",
@@ -336,14 +424,11 @@ files_layout = html.Div(
                 "marginBottom": "20px",
             },
             children=[
-
-                # 3-column checklist
                 html.Div(
                     dcc.Checklist(
                         id="box-dropdown",
                         options=CATEGORY_OPTIONS,
-                        # select all by default
-                        value=[opt["value"] for opt in CATEGORY_OPTIONS],
+                        value=[opt["value"] for opt in CATEGORY_OPTIONS],  # all selected by default
                         inputStyle={"marginRight": "6px"},
                         labelStyle={"display": "block"},
                     ),
@@ -359,8 +444,6 @@ files_layout = html.Div(
                         "margin": "0 auto",
                     },
                 ),
-
-                # Select/Clear buttons
                 html.Div(
                     [
                         html.Button(
@@ -382,25 +465,98 @@ files_layout = html.Div(
             ],
         ),
 
-        # Date Range Filter
+        # ── Row 2: Product Filter (3 cols) ──
         html.Div(
             style={
-                'display': 'flex',
-                'justifyContent': 'center',
-                'alignItems': 'center',
-                'gap': '15px',
-                'marginBottom': '20px',
-                'padding': '15px',
-                'backgroundColor': '#f8f9fa',
-                'borderRadius': '8px',
-                'border': '1px solid #dee2e6',
-                'maxWidth': '700px',
-                'margin': '0 auto 20px auto'
+                "display": "flex",
+                "justifyContent": "center",
+                "alignItems": "flex-start",
+                "gap": "20px",
+                "marginBottom": "20px",
             },
             children=[
+                html.Div(
+                    dcc.Checklist(
+                        id="product-dropdown",
+                        options=PRODUCT_OPTIONS,
+                        value=[opt["value"] for opt in PRODUCT_OPTIONS],  # all selected by default
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block"},
+                    ),
+                    style={
+                        "columnCount": 3,
+                        "columnGap": "1em",
+                        "border": "1px solid #ccc",
+                        "borderRadius": "4px",
+                        "padding": "10px",
+                        "maxHeight": "200px",
+                        "overflowY": "auto",
+                        "width": "70%",
+                        "margin": "0 auto",
+                    },
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Select All", id="select-all-products", n_clicks=0,
+                            className="btn btn-sm btn-outline-primary"
+                        ),
+                        html.Button(
+                            "Clear All",  id="clear-all-products",  n_clicks=0,
+                            className="btn btn-sm btn-outline-secondary"
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "flexDirection": "column",
+                        "gap": "8px",
+                        "justifyContent": "center",
+                    },
+                ),
+            ],
+        ),
+
+        # ── Row 3: Search Bars + Date Range + Counter (horizontal layout) ──
+        html.Div(
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "justifyContent": "center",
+                "alignItems": "center",
+                "gap": "15px",
+                "marginBottom": "20px",
+                "padding": "15px",
+                "backgroundColor": "#f8f9fa",
+                "borderRadius": "8px",
+                "border": "1px solid #dee2e6",
+            },
+            children=[
+                # Title search
+                dcc.Input(
+                    id="title-search-input",
+                    type="text",
+                    placeholder="Search Titles…",
+                    debounce=True,
+                    style={"width": "250px", "padding": "6px"},
+                ),
+                html.Button("×", id="clear-title-search", className="btn btn-link btn-sm"),
+                html.Button("Search", id="title-search-btn", className="btn btn-primary btn-sm"),
+                
+                # Content search
+                dcc.Input(
+                    id="content-search-input",
+                    type="text",
+                    placeholder="Search inside PDFs…",
+                    debounce=True,
+                    style={"width": "250px", "padding": "6px"},
+                ),
+                html.Button("×", id="clear-content-search", className="btn btn-link btn-sm"),
+                html.Button("Search", id="content-search-btn", className="btn btn-primary btn-sm"),
+                
+                # Date range
                 html.Label(
-                    "📅 Date Range:",
-                    style={'fontWeight': 'bold', 'fontSize': '14px', 'marginRight': '10px'}
+                    "📅",
+                    style={'fontWeight': 'bold', 'fontSize': '14px', 'marginLeft': '10px'}
                 ),
                 dcc.DatePickerRange(
                     id='date-range-picker',
@@ -414,25 +570,23 @@ files_layout = html.Div(
                     "Clear",
                     id="clear-dates-btn",
                     className="btn btn-sm btn-outline-secondary",
-                    style={'marginLeft': '10px'}
+                ),
+                
+                # Article counter
+                html.Div(
+                    id='article-counter',
+                    style={
+                        'fontSize': '15px',
+                        'color': '#495057',
+                        'fontWeight': '500',
+                        'marginLeft': '10px'
+                    },
+                    children="Loading..."
                 ),
             ],
         ),
 
-        # Article counter
-        html.Div(
-            id='article-counter',
-            style={
-                'textAlign': 'center',
-                'fontSize': '15px',
-                'color': '#495057',
-                'marginBottom': '20px',
-                'fontWeight': '500'
-            },
-            children="Loading..."
-        ),
-
-        # Row 2.5: Progress bar section
+        # Row 4: Progress bar section
         html.Div(
             style={
                 'display': 'flex',
@@ -442,8 +596,6 @@ files_layout = html.Div(
                 'marginBottom': '20px',
             },
             children=[
-
-                # Progress bar with file count
                 html.Div(
                     id="progress-container",
                     style={"visibility": "hidden", "marginBottom": "10px"},
@@ -471,8 +623,7 @@ files_layout = html.Div(
             ],
         ),
 
-
-        # Row 3: DataTable
+        # Row 5: DataTable
         dcc.Loading(
             id="loading-table",
             type="default",
@@ -481,12 +632,13 @@ files_layout = html.Div(
                     dash_table.DataTable(
                     id="files-table",
                     columns=[
-                        {"id": "firm",      "name": "Firm"},
-                        {"id": "frequency", "name": "Frequency"},
-                        {"id": "date",      "name": "Date"},
-                        {"id": "title",     "name": "Title"},
-                        {"id": "summary",   "name": "Summary", "presentation": "markdown"},
-                        {"id": "view",      "name": "View",    "presentation": "markdown"},
+                        {"id": "firm",             "name": "Firm"},
+                        {"id": "frequency",        "name": "Frequency"},
+                        {"id": "date",             "name": "Date"},
+                        {"id": "title",            "name": "Title"},
+                        {"id": "product_categories", "name": "Categories"},
+                        {"id": "summary",          "name": "Summary", "presentation": "markdown"},
+                        {"id": "view",             "name": "View",    "presentation": "markdown"},
                     ],
                     data=[],
                     filter_action="native",
@@ -495,7 +647,7 @@ files_layout = html.Div(
                     page_size=20,
 
 
-                    # highlight today’s rows
+                    # highlight today's rows
                     style_data_conditional=[
                         # 1) odd/even for all the other rows
                         {"if": {"row_index": "odd"},  "backgroundColor": ROW_ODD_COLOR},
@@ -664,7 +816,7 @@ app.layout = html.Div([
     )
 ])
 
-# ── 4b) “Select All / Clear All” for the category dropdown ──
+# ── 4b) "Select All / Clear All" for the category dropdown ──
 @app.callback(
     Output("box-dropdown", "value"),
     Input("select-all", "n_clicks"),
@@ -678,6 +830,24 @@ def select_clear_all(n_select, n_clear, options):
     if triggered == "select-all":
         return all_vals
     elif triggered == "clear-all":
+        return []
+    return dash.no_update
+
+
+# ── 4c) "Select All / Clear All" for the product dropdown ──
+@app.callback(
+    Output("product-dropdown", "value"),
+    Input("select-all-products", "n_clicks"),
+    Input("clear-all-products",  "n_clicks"),
+    State("product-dropdown", "options"),
+    prevent_initial_call=True,
+)
+def select_clear_all_products(n_select, n_clear, options):
+    triggered = ctx.triggered_id
+    all_vals = [opt["value"] for opt in options]
+    if triggered == "select-all-products":
+        return all_vals
+    elif triggered == "clear-all-products":
         return []
     return dash.no_update
 
@@ -726,6 +896,9 @@ def clear_date_range(n_clicks):
         Output("progress-bar", "children"),
     ],
     [
+        Input("product-dropdown",     "value"),
+        Input("select-all-products",  "n_clicks"),
+        Input("clear-all-products",   "n_clicks"),
         Input("box-dropdown",         "value"),
         Input("select-all",           "n_clicks"),
         Input("clear-all",            "n_clicks"),
@@ -739,43 +912,71 @@ def clear_date_range(n_clicks):
         Input("login-user",           "data"),
     ],
     [
+        State("product-dropdown",     "options"),
         State("box-dropdown",         "options"),
         State("title-search-input",   "value"),
         State("content-search-input", "value"),
     ],
-    prevent_initial_call=True,
+    prevent_initial_call=False,
 )
 def update_file_table(
+    sel_products, n_select_prod, n_clear_prod,
     sel, n_select, n_clear,
     _tbtn, _tenter,
     _cbtn, _center,
     start_date, end_date, _clear_dates,
     login_user,
-    options, title_value, content_value
+    product_options, options, title_value, content_value
 ):
+    # Return empty data if not logged in (main-section is hidden anyway)
+    if not login_user:
+        cols = [
+            {"id": "firm", "name": "Firm", "type": "text"},
+            {"id": "frequency", "name": "Frequency", "type": "text"},
+            {"id": "date", "name": "Date", "type": "datetime"},
+            {"id": "title", "name": "Title", "type": "text"},
+            {"id": "summary", "name": "Summary", "presentation": "markdown"},
+            {"id": "view", "name": "View", "presentation": "markdown"},
+        ]
+        return cols, [], "", {"visibility": "hidden"}, "", {"width": "0%"}, "0%"
     
-    # path to “Small Caps” folder
+    # path to "Small Caps" folder
     SC = r"C:\Users\H&CDanHughes\Documents\SC_files"
 
-    # 1) Handle Select/Clear All
+    # 1) Handle Select/Clear All for both products and categories
     triggered = ctx.triggered_id
-    if triggered == "select-all":
+    if triggered == "select-all-products":
+        sel_products = [opt["value"] for opt in product_options]
+    elif triggered == "clear-all-products":
+        sel_products = []
+    elif triggered == "select-all":
         sel = [opt["value"] for opt in options]
     elif triggered == "clear-all":
         sel = []
 
+    selected_products = set(sel_products or [])
     selected = set(sel or [])
     tt = (title_value or "").strip().lower()
     ct = (content_value or "").strip().lower()
+    
+    # Check if all products are selected (if so, skip product filtering)
+    # Handle case where product_options might not be initialized yet
+    if product_options:
+        total_products = len(product_options)
+        all_products_selected = len(selected_products) >= total_products
+    else:
+        # Fallback: if no options yet, assume all selected (show everything)
+        all_products_selected = True
 
-    # 2) Build columns (dynamically - includes summary for all users)
+    # 2) Build columns (dynamically - includes summary and product categories for all users)
     cols = [
-        {"id": "firm",      "name": "Firm",      "type": "text"},
-        {"id": "frequency", "name": "Frequency", "type": "text"},
-        {"id": "date",      "name": "Date",      "type": "datetime"},
-        {"id": "title",     "name": "Title",     "type": "text"},
-        {"id": "summary",   "name": "Summary",   "presentation": "markdown"},
-        {"id": "view",      "name": "View",      "presentation": "markdown"},
+        {"id": "firm",             "name": "Firm",      "type": "text"},
+        {"id": "frequency",        "name": "Frequency", "type": "text"},
+        {"id": "date",             "name": "Date",      "type": "datetime"},
+        {"id": "title",            "name": "Title",     "type": "text"},
+        {"id": "product_categories", "name": "Categories", "type": "text"},  # NEW: Product categories
+        {"id": "summary",          "name": "Summary",   "presentation": "markdown"},
+        {"id": "view",             "name": "View",      "presentation": "markdown"},
     ]
     if login_user == "iwill":
         cols.insert(4, {"id": "subject",  "name": "Subject",  "type": "text"})
@@ -818,6 +1019,14 @@ def update_file_table(
                 date_part = ""
                 fcode = "u"
 
+            # apply product filter (only if NOT all products are selected)
+            # If all products selected, show everything (including files with no products)
+            if not all_products_selected:
+                file_products = detect_products(fname)
+                # File must contain at least one selected product, OR have no products (show all unlabeled)
+                if file_products and not any(prod in selected_products for prod in file_products):
+                    continue
+
             # extract date + flag if it's today
             try:
                 dt = datetime.datetime.strptime(date_part, "%Y%m%d")
@@ -852,6 +1061,12 @@ def update_file_table(
             # Check for summary (do this ONCE during candidate building, not later)
             has_sum, sum_filename = has_summary_file(full_path)
             
+            # Load product categories from summary JSON if available
+            product_categories = {}
+            if has_sum and sum_filename.endswith('.json'):
+                summary_path = os.path.join(dpath, sum_filename)
+                product_categories = load_product_categories_from_summary(summary_path)
+            
             candidate_files.append({
                 'path': full_path,
                 'fname': fname,
@@ -861,8 +1076,9 @@ def update_file_table(
                 'is_today': is_today,
                 'frequency': frequency,
                 'subj': subj,
-                'has_summary': has_sum,              # NEW: cached for performance
-                'summary_filename': sum_filename      # NEW: cached for performance
+                'has_summary': has_sum,
+                'summary_filename': sum_filename,
+                'product_categories': product_categories  # NEW: Product categories from summary
             })
 
     # Batch process PDF content search if needed
@@ -908,14 +1124,18 @@ def update_file_table(
         else:
             summary_md = "—"
         
+        # Format product categories for display
+        product_categories_str = format_product_categories(file_info.get('product_categories', {}))
+        
         row = {
-            "firm":      file_info['category'],
-            "frequency": file_info['frequency'],
-            "date":      file_info['date_fmt'],
-            "title":     file_info['title_str'],
-            "summary":   summary_md,
-            "view":      view_md,
-            "is_today":  file_info['is_today']
+            "firm":              file_info['category'],
+            "frequency":         file_info['frequency'],
+            "date":              file_info['date_fmt'],
+            "title":             file_info['title_str'],
+            "product_categories": product_categories_str,  # NEW: Product categories
+            "summary":           summary_md,
+            "view":              view_md,
+            "is_today":          file_info['is_today']
         }
         if login_user == "iwill":
             row["subject"]  = file_info['subj']
@@ -937,10 +1157,12 @@ def update_file_table(
     total_candidates = len(candidate_files)
     
     # Determine if any filters are active
+    all_categories_selected = len(selected) >= len(options) if options else True
     filters_active = (
         ct or tt or 
         (start_date or end_date) or 
-        (selected and len(selected) < len(options))
+        (not all_categories_selected) or
+        (not all_products_selected)
     )
     
     # Build counter text

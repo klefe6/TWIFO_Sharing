@@ -284,15 +284,36 @@ def summarize_trader_brief(text: str) -> dict:
 def main() -> None:
     if not PDF_PATH.exists():
         raise SystemExit(f"PDF not found: {PDF_PATH}")
-
-    raw_text = extract_text(PDF_PATH, max_pages=MAX_PAGES)
-    clean_text = strip_trailing_boilerplate(raw_text)
-
-    summary = summarize_trader_brief(clean_text)
-
-    out_file = PDF_PATH.with_suffix(".summary.json")
-    out_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print("Wrote:", out_file)
+    
+    # Check if should skip (Chart Books)
+    from summarize_pdf import should_skip_summary
+    if should_skip_summary(PDF_PATH.name):
+        print(f"[SKIP] Chart Book detected, skipping summarization: {PDF_PATH.name}")
+        return
+    
+    # Use the new summarization module
+    try:
+        from summarize_pdf import summarize_pdf, create_summary_file
+        
+        print(f"[INFO] Generating summary for {PDF_PATH.name}...")
+        summary = summarize_pdf(PDF_PATH, max_pages=MAX_PAGES)
+        
+        if summary:
+            summary_file = create_summary_file(PDF_PATH, summary)
+            print(f"[OK] Summary created: {summary_file}")
+        else:
+            print("[WARN] Summary generation returned None")
+            
+    except ImportError:
+        # Fallback to old method if module not available
+        print("[WARN] Using legacy summarization method")
+        raw_text = extract_text(PDF_PATH, max_pages=MAX_PAGES)
+        clean_text = strip_trailing_boilerplate(raw_text)
+        summary = summarize_trader_brief(clean_text)
+        
+        out_file = PDF_PATH.with_suffix(".summary.json")
+        out_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print("Wrote:", out_file)
 
 
 if __name__ == "__main__":
