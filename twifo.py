@@ -239,6 +239,32 @@ def pdf_contains(filepath: str, term_lower: str) -> bool:
     """Legacy wrapper - use pdf_contains_cached for better performance."""
     return pdf_contains_cached(filepath, term_lower)
 
+
+def has_summary_file(filepath: str) -> tuple[bool, str]:
+    """
+    Check if summary file exists for given PDF.
+    Returns: (exists: bool, summary_filename: str)
+    
+    Note: Returns just the filename (not full path) for URL generation.
+    Summary must exist in same directory as source PDF.
+    """
+    if not filepath.endswith('.pdf'):
+        return False, ""
+    
+    # Build summary path (same directory as source)
+    base_path = filepath[:-4]  # Remove .pdf extension
+    summary_path = f"{base_path}__sum.pdf"
+    
+    if os.path.isfile(summary_path):
+        return True, os.path.basename(summary_path)
+    
+    # Future: check for __sum.json
+    # summary_json = f"{base_path}__sum.json"
+    # if os.path.isfile(summary_json):
+    #     return True, os.path.basename(summary_json)
+    
+    return False, ""
+
 ############################
 # 3) INITIALIZE APP
 ############################
@@ -353,6 +379,69 @@ files_layout = html.Div(
                         "justifyContent": "center",
                     },
                 ),
+            ],
+        ),
+
+        # Date Range Filter
+        html.Div(
+            style={
+                'display': 'flex',
+                'justifyContent': 'center',
+                'alignItems': 'center',
+                'gap': '15px',
+                'marginBottom': '20px',
+                'padding': '15px',
+                'backgroundColor': '#f8f9fa',
+                'borderRadius': '8px',
+                'border': '1px solid #dee2e6',
+                'maxWidth': '700px',
+                'margin': '0 auto 20px auto'
+            },
+            children=[
+                html.Label(
+                    "📅 Date Range:",
+                    style={'fontWeight': 'bold', 'fontSize': '14px', 'marginRight': '10px'}
+                ),
+                dcc.DatePickerRange(
+                    id='date-range-picker',
+                    start_date=None,
+                    end_date=None,
+                    display_format='YYYY-MM-DD',
+                    style={'fontSize': '13px'},
+                    clearable=True
+                ),
+                html.Button(
+                    "Clear",
+                    id="clear-dates-btn",
+                    className="btn btn-sm btn-outline-secondary",
+                    style={'marginLeft': '10px'}
+                ),
+            ],
+        ),
+
+        # Article counter
+        html.Div(
+            id='article-counter',
+            style={
+                'textAlign': 'center',
+                'fontSize': '15px',
+                'color': '#495057',
+                'marginBottom': '20px',
+                'fontWeight': '500'
+            },
+            children="Loading..."
+        ),
+
+        # Row 2.5: Progress bar section
+        html.Div(
+            style={
+                'display': 'flex',
+                'justifyContent': 'center',
+                'alignItems': 'center',
+                'gap': '20px',
+                'marginBottom': '20px',
+            },
+            children=[
 
                 # Progress bar with file count
                 html.Div(
@@ -396,7 +485,8 @@ files_layout = html.Div(
                         {"id": "frequency", "name": "Frequency"},
                         {"id": "date",      "name": "Date"},
                         {"id": "title",     "name": "Title"},
-                        {"id": "view",      "name": "View",      "presentation": "markdown"},
+                        {"id": "summary",   "name": "Summary", "presentation": "markdown"},
+                        {"id": "view",      "name": "View",    "presentation": "markdown"},
                     ],
                     data=[],
                     filter_action="native",
@@ -616,9 +706,20 @@ def clear_content_and_search(n_clear, n_search):
     return "", (n_search or 0) + 1
 
 @app.callback(
+    [Output("date-range-picker", "start_date"),
+     Output("date-range-picker", "end_date")],
+    Input("clear-dates-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def clear_date_range(n_clicks):
+    """Clear date range filter."""
+    return None, None
+
+@app.callback(
     [
         Output("files-table", "columns"),
         Output("files-table", "data"),
+        Output("article-counter", "children"),
         Output("progress-container", "style"),
         Output("progress-text", "children"),
         Output("progress-bar", "style"),
@@ -632,6 +733,9 @@ def clear_content_and_search(n_clear, n_search):
         Input("title-search-input",   "n_submit"),
         Input("content-search-btn",   "n_clicks"),
         Input("content-search-input", "n_submit"),
+        Input("date-range-picker",    "start_date"),
+        Input("date-range-picker",    "end_date"),
+        Input("clear-dates-btn",      "n_clicks"),
         Input("login-user",           "data"),
     ],
     [
@@ -645,6 +749,7 @@ def update_file_table(
     sel, n_select, n_clear,
     _tbtn, _tenter,
     _cbtn, _center,
+    start_date, end_date, _clear_dates,
     login_user,
     options, title_value, content_value
 ):
@@ -663,12 +768,13 @@ def update_file_table(
     tt = (title_value or "").strip().lower()
     ct = (content_value or "").strip().lower()
 
-    # 2) Build columns
+    # 2) Build columns (dynamically - includes summary for all users)
     cols = [
-        {"id": "firm",  "name": "Firm",  "type": "text"},
+        {"id": "firm",      "name": "Firm",      "type": "text"},
         {"id": "frequency", "name": "Frequency", "type": "text"},
         {"id": "date",      "name": "Date",      "type": "datetime"},
         {"id": "title",     "name": "Title",     "type": "text"},
+        {"id": "summary",   "name": "Summary",   "presentation": "markdown"},
         {"id": "view",      "name": "View",      "presentation": "markdown"},
     ]
     if login_user == "iwill":
@@ -717,9 +823,20 @@ def update_file_table(
                 dt = datetime.datetime.strptime(date_part, "%Y%m%d")
                 date_fmt = dt.strftime("%Y-%m-%d")
                 is_today = (dt.date() == datetime.date.today())
+                
+                # Apply date range filter (uses already-parsed dt object)
+                if start_date and dt.date() < datetime.datetime.fromisoformat(start_date).date():
+                    continue  # Skip files before start_date
+                if end_date and dt.date() > datetime.datetime.fromisoformat(end_date).date():
+                    continue  # Skip files after end_date
+                    
             except:
                 date_fmt = "Unknown"
                 is_today = False
+                
+                # Skip files with unparseable dates if date filter is active
+                if start_date or end_date:
+                    continue
 
             # map frequency
             fmap = {"y":"Yearly","q":"Quarterly","m":"Monthly","w":"Weekly","u":""}
@@ -731,6 +848,10 @@ def update_file_table(
             
             # Collect file info for batch PDF search
             full_path = os.path.join(dpath, fname)
+            
+            # Check for summary (do this ONCE during candidate building, not later)
+            has_sum, sum_filename = has_summary_file(full_path)
+            
             candidate_files.append({
                 'path': full_path,
                 'fname': fname,
@@ -739,7 +860,9 @@ def update_file_table(
                 'date_fmt': date_fmt,
                 'is_today': is_today,
                 'frequency': frequency,
-                'subj': subj
+                'subj': subj,
+                'has_summary': has_sum,              # NEW: cached for performance
+                'summary_filename': sum_filename      # NEW: cached for performance
             })
 
     # Batch process PDF content search if needed
@@ -777,11 +900,20 @@ def update_file_table(
         # build the single row (with is_today flag)
         safe = urllib.parse.quote(file_info['fname'])
         view_md = f"[View](/view?file={safe})"
+        
+        # Summary link (using cached detection)
+        if file_info['has_summary']:
+            safe_sum = urllib.parse.quote(file_info['summary_filename'])
+            summary_md = f"[📄 View](/view?file={safe_sum})"
+        else:
+            summary_md = "—"
+        
         row = {
             "firm":      file_info['category'],
             "frequency": file_info['frequency'],
             "date":      file_info['date_fmt'],
             "title":     file_info['title_str'],
+            "summary":   summary_md,
             "view":      view_md,
             "is_today":  file_info['is_today']
         }
@@ -800,6 +932,23 @@ def update_file_table(
 
     rows.sort(key=sort_key, reverse=True)
 
+    # Calculate article counts for counter
+    total_shown = len(rows)
+    total_candidates = len(candidate_files)
+    
+    # Determine if any filters are active
+    filters_active = (
+        ct or tt or 
+        (start_date or end_date) or 
+        (selected and len(selected) < len(options))
+    )
+    
+    # Build counter text
+    if filters_active:
+        counter_text = f"📊 Showing {total_shown} article{'s' if total_shown != 1 else ''} (filtered from {total_candidates} candidates)"
+    else:
+        counter_text = f"📊 Showing {total_shown} article{'s' if total_shown != 1 else ''}"
+
     # Return progress info (already set above if PDF search was performed)
     if not ct or not candidate_files:
         progress_style = {"visibility": "hidden", "marginBottom": "10px"}
@@ -807,7 +956,7 @@ def update_file_table(
         progress_bar_style = {"width": "0%", "transition": "width 0.3s ease"}
         progress_bar_text = "0%"
     
-    return cols, rows, progress_style, progress_text, progress_bar_style, progress_bar_text
+    return cols, rows, counter_text, progress_style, progress_text, progress_bar_style, progress_bar_text
 
 
 ############################
