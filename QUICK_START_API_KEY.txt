@@ -1,0 +1,58 @@
+═══════════════════════════════════════════════════════════════════
+  OPENAI API KEY - QUICK REFERENCE GUIDE
+═══════════════════════════════════════════════════════════════════
+
+✅ YOUR API KEY IS NOW SET UP! ✅
+
+The script will now automatically find your API key from:
+  1. .env file (in this directory) ← MOST RELIABLE ✓
+  2. Windows Environment Variables (User/System)
+  3. config.txt file (if you create one)
+
+═══════════════════════════════════════════════════════════════════
+  HOW IT WORKS NOW:
+═══════════════════════════════════════════════════════════════════
+
+1. ✅ I created a .env file with your API key
+2. ✅ The script automatically checks .env file first
+3. ✅ No need to set environment variables anymore!
+4. ✅ Works every time, no reload needed
+
+═══════════════════════════════════════════════════════════════════
+  TO USE THE SCRIPT:
+═══════════════════════════════════════════════════════════════════
+
+Simply run:
+   python test_summarize_one.py
+
+That's it! No environment variable setup needed.
+
+═══════════════════════════════════════════════════════════════════
+  IF YOU NEED TO UPDATE THE API KEY:
+═══════════════════════════════════════════════════════════════════
+
+1. Open the file: .env (in this directory)
+2. Edit the line: OPENAI_API_KEY=your_new_key_here
+3. Save the file
+4. Run the script - it will use the new key immediately!
+
+═══════════════════════════════════════════════════════════════════
+  TEST IT WORKS:
+═══════════════════════════════════════════════════════════════════
+
+Run this command:
+   python -c "from test_summarize_one import load_api_key; print('OK!' if load_api_key() else 'ERROR!')"
+
+You should see: OK!
+
+═══════════════════════════════════════════════════════════════════
+  FILES CREATED:
+═══════════════════════════════════════════════════════════════════
+
+✓ .env                    - Your API key (DO NOT commit to git!)
+✓ .gitignore              - Already ignores .env (safe)
+✓ README_SETUP_API_KEY.md - Detailed setup guide
+
+═══════════════════════════════════════════════════════════════════
+
+You're all set! The script will find your API key automatically.
