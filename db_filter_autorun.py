@@ -272,16 +272,22 @@ def main():
             copied += 1
             print(f"[OK] {src} -> {dst.name}")
             
-            # Generate summary for newly copied files (skip Chart Books)
+            # Generate summary for newly copied files (only if summary doesn't exist)
             if SUMMARIZE_AVAILABLE:
                 try:
-                    print(f"[INFO] Generating summary for {dst.name}...")
-                    summary = summarize_pdf(dst)
-                    if summary:
-                        summary_file = create_summary_file(dst, summary)
-                        print(f"[OK] Summary created: {summary_file.name}")
+                    # Check if summary already exists
+                    summary_json_path = dst.parent / f"{dst.stem}__sum.json"
+                    summary_pdf_path = dst.parent / f"{dst.stem}__sum.pdf"
+                    
+                    if summary_pdf_path.exists() and summary_json_path.exists():
+                        print(f"[SKIP] Summary PDF and JSON already exist for {dst.name}")
                     else:
-                        print(f"[SKIP] Summary skipped for {dst.name} (Chart Book or other reason)")
+                        print(f"[INFO] Generating summary for {dst.name}...")
+                        summary = summarize_pdf(dst, generate_pdf=True)  # Generate both JSON and PDF
+                        if summary:
+                            print(f"[OK] Summary created for {dst.name}")
+                        # Note: summarize_pdf() already prints error messages for API key issues,
+                        # and returns None for Chart Books or other skip reasons
                 except Exception as e:
                     print(f"[WARN] Failed to create summary for {dst.name}: {e}")
         except Exception as e:

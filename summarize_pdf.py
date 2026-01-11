@@ -22,7 +22,7 @@ def load_api_key() -> str:
     """Load OPENAI_API_KEY from .env, environment variables, or config.txt"""
     script_dir = Path(__file__).parent
     
-    # Method 1: Try .env file
+    # Method 1: Try .env file with python-dotenv
     try:
         from dotenv import load_dotenv
         env_file = script_dir / ".env"
@@ -32,21 +32,48 @@ def load_api_key() -> str:
             if key:
                 return key
     except ImportError:
-        pass
+        pass  # python-dotenv not installed, fall through to manual parsing
+    except Exception as e:
+        print(f"[WARN] Error loading .env with python-dotenv: {e}")
     
     # Method 2: Try .env file manually
     env_file = script_dir / ".env"
     if env_file.exists():
         try:
             with open(env_file, 'r', encoding='utf-8') as f:
-                for line in f:
+                found_key_line = False
+                for line_num, line in enumerate(f, 1):
+                    original_line = line
                     line = line.strip()
-                    if line.startswith('OPENAI_API_KEY='):
-                        key = line.split('=', 1)[1].strip().strip('"').strip("'")
-                        if key:
-                            return key
-        except Exception:
-            pass
+                    # Skip empty lines and comments
+                    if not line or line.startswith('#'):
+                        continue
+                    # Try multiple formats: OPENAI_API_KEY=, OPENAI_API_KEY =, etc.
+                    if 'OPENAI_API_KEY' in line.upper():
+                        found_key_line = True
+                        # Handle various formats: OPENAI_API_KEY=value, OPENAI_API_KEY = value, etc.
+                        if '=' in line:
+                            parts = line.split('=', 1)
+                            if len(parts) == 2:
+                                key = parts[1].strip().strip('"').strip("'")
+                                if key:
+                                    return key
+                                else:
+                                    print(f"[WARN] OPENAI_API_KEY found in .env but value is empty (line {line_num}): {original_line.strip()}")
+                        else:
+                            print(f"[WARN] OPENAI_API_KEY found in .env but no '=' sign found (line {line_num}): {original_line.strip()}")
+                if not found_key_line:
+                    print(f"[WARN] .env file exists at {env_file} but no OPENAI_API_KEY line found.")
+                    print(f"[DEBUG] First few lines of .env file:")
+                    try:
+                        with open(env_file, 'r', encoding='utf-8') as f2:
+                            for i, debug_line in enumerate(f2, 1):
+                                if i <= 5:  # Show first 5 lines
+                                    print(f"  Line {i}: {repr(debug_line.strip())}")
+                    except:
+                        pass
+        except Exception as e:
+            print(f"[WARN] Error reading .env file at {env_file}: {e}")
     
     # Method 3: Environment variable
     key = os.getenv("OPENAI_API_KEY")
@@ -59,12 +86,15 @@ def load_api_key() -> str:
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
                     if 'OPENAI_API_KEY' in line:
                         key = line.split('=', 1)[1].strip().strip('"').strip("'")
                         if key:
                             return key
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Error reading config.txt: {e}")
     
     return None
 
@@ -76,35 +106,49 @@ MAX_OUTPUT_TOKENS = 900
 OPENAI_API_KEY = load_api_key()
 
 
-# Product category mapping
+# Product category mapping with ticker codes
 PRODUCT_CATEGORIES = {
-    "Metals": {
-        "keywords": ["gold", "silver", "copper", "platinum", "palladium", "zinc", "aluminum", "aluminium", "nickel", "tin", "lead"],
-        "specific": ["xau", "xag", "gc", "si", "hg", "hg", "pa", "pl"]
-    },
-    "Energy": {
+    "E": {  # Energy
+        "name": "Energy",
         "keywords": ["oil", "crude", "wti", "brent", "natural gas", "nat gas", "gasoline", "heating oil", "diesel", "ng"],
-        "specific": ["cl", "b", "rb", "ho", "ng"]
+        "specific": ["cl", "b", "rb", "ho", "ng"],
+        "ticker_map": {"oil": "CL", "crude": "CL", "wti": "CL", "brent": "B", "natural gas": "NG", "nat gas": "NG", "ng": "NG", "gasoline": "RB", "heating oil": "HO"}
     },
-    "Crypto": {
+    "M": {  # Metals
+        "name": "Metals",
+        "keywords": ["gold", "silver", "copper", "platinum", "palladium", "zinc", "aluminum", "aluminium", "nickel", "tin", "lead"],
+        "specific": ["xau", "xag", "gc", "si", "hg", "pa", "pl"],
+        "ticker_map": {"gold": "GC", "xau": "GC", "silver": "SI", "xag": "SI", "copper": "HG", "platinum": "PL", "palladium": "PA"}
+    },
+    "C": {  # Crypto
+        "name": "Crypto",
         "keywords": ["bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency", "digital asset"],
-        "specific": ["btc", "eth", "usdt", "usdc"]
+        "specific": ["btc", "eth", "usdt", "usdc"],
+        "ticker_map": {"bitcoin": "BTC", "ethereum": "ETH"}
     },
-    "Rates": {
+    "R": {  # Rates
+        "name": "Rates",
         "keywords": ["rates", "yield", "treasury", "bond", "sofr", "fed funds", "interest rate", "yield curve"],
-        "specific": ["tn", "zn", "zb", "ub", "sofr", "ff"]
+        "specific": ["tn", "zn", "zb", "ub", "sofr", "ff"],
+        "ticker_map": {"treasury": "ZN", "bond": "ZN", "sofr": "SOFR", "fed funds": "FF"}
     },
-    "FX": {
-        "keywords": ["fx", "forex", "currency", "dollar", "euro", "yen", "pound", "sterling", "dxy", "usd", "eur", "jpy", "gbp", "chf", "cad"],
-        "specific": ["usd", "eur", "jpy", "gbp", "chf", "cad", "aud", "nzd", "dxy"]
+    "FX": {  # Forex
+        "name": "FX",
+        "keywords": ["fx", "forex", "currency", "dollar", "euro", "yen", "pound", "sterling", "dxy"],
+        "specific": ["usd", "eur", "jpy", "gbp", "chf", "cad", "aud", "nzd", "dxy"],
+        "ticker_map": {"dollar": "USD", "euro": "EUR", "yen": "JPY", "pound": "GBP", "sterling": "GBP", "dxy": "DXY"}
     },
-    "Equity Indices": {
-        "keywords": ["s&p", "spx", "sp500", "nasdaq", "dow", "dax", "ftse", "nikkei", "equity", "stock index", "es", "nq", "ym"],
-        "specific": ["es", "nq", "ym", "rt", "rty"]
+    "I": {  # Indices
+        "name": "Indices",
+        "keywords": ["s&p", "spx", "sp500", "nasdaq", "dow", "dax", "ftse", "nikkei", "equity", "stock index"],
+        "specific": ["es", "nq", "ym", "rt", "rty"],
+        "ticker_map": {"s&p": "ES", "spx": "ES", "sp500": "ES", "nasdaq": "NQ", "dow": "YM", "dax": "DAX", "ftse": "FTSE", "nikkei": "NKD"}
     },
-    "Agriculture": {
+    "AG": {  # Agriculture
+        "name": "Agriculture",
         "keywords": ["wheat", "corn", "soybean", "cotton", "sugar", "coffee", "cocoa", "livestock", "cattle", "hogs"],
-        "specific": ["zw", "zc", "zs", "ct", "sb", "kc", "cc", "lc", "he", "gf"]
+        "specific": ["zw", "zc", "zs", "ct", "sb", "kc", "cc", "lc", "he", "gf"],
+        "ticker_map": {"wheat": "ZW", "corn": "ZC", "soybean": "ZS", "cotton": "CT", "sugar": "SB", "coffee": "KC", "cocoa": "CC", "cattle": "LC", "hogs": "HE"}
     }
 }
 
@@ -124,29 +168,31 @@ def should_skip_summary(filename: str) -> bool:
 
 def categorize_products(products: list[str]) -> dict[str, list[str]]:
     """
-    Categorize products into groups (Metals, Energy, Crypto, etc.).
-    Returns: {"Metals": ["gold", "silver"], "Energy": ["oil"], ...}
+    Categorize products into groups and convert to tickers.
+    Returns: {"E": ["CL", "NG"], "M": ["GC", "SI"], ...}
     """
     categorized = {}
     text_lower = " ".join(products).lower()
     
-    for category, patterns in PRODUCT_CATEGORIES.items():
-        found_products = []
+    for category_code, patterns in PRODUCT_CATEGORIES.items():
+        found_tickers = set()
         
-        # Check keywords
+        # Check keywords and map to tickers
         for keyword in patterns["keywords"]:
             if keyword.lower() in text_lower:
-                found_products.append(keyword)
+                # Map to ticker if available
+                ticker = patterns["ticker_map"].get(keyword.lower(), keyword.upper())
+                found_tickers.add(ticker)
         
         # Check specific tickers/symbols
         for symbol in patterns["specific"]:
             # Use word boundaries to avoid false matches
             pattern = r'\b' + re.escape(symbol.lower()) + r'\b'
             if re.search(pattern, text_lower):
-                found_products.append(symbol.upper())
+                found_tickers.add(symbol.upper())
         
-        if found_products:
-            categorized[category] = list(set(found_products))  # Remove duplicates
+        if found_tickers:
+            categorized[category_code] = sorted(list(found_tickers))
     
     return categorized
 
@@ -197,13 +243,14 @@ def extract_text(pdf_path: Path, max_pages: int = MAX_PAGES_TO_SCAN) -> str:
         raise RuntimeError(f"Failed to extract text from PDF {pdf_path.name}: {e}")
 
 
-def summarize_pdf(pdf_path: Path, max_pages: int = MAX_PAGES_TO_SCAN) -> Optional[dict]:
+def summarize_pdf(pdf_path: Path, max_pages: int = MAX_PAGES_TO_SCAN, generate_pdf: bool = True) -> Optional[dict]:
     """
     Summarize a PDF file. Returns summary dict or None if skipped/failed.
     
     Args:
         pdf_path: Path to PDF file
         max_pages: Maximum pages to extract text from
+        generate_pdf: If True, also generate __sum.pdf from the JSON
     
     Returns:
         Summary dictionary with product categories, or None if skipped/error
@@ -225,10 +272,25 @@ def summarize_pdf(pdf_path: Path, max_pages: int = MAX_PAGES_TO_SCAN) -> Optiona
         # Generate summary
         summary = _call_openai_api(clean_text)
         
-        # Categorize products
+        # Categorize products (compact ticker format)
         products = summary.get("products", [])
         if products:
             summary["product_categories"] = categorize_products(products)
+        
+        # Save JSON summary
+        json_path = create_summary_file(pdf_path, summary)
+        print(f"[OK] JSON summary created: {json_path.name}")
+        
+        # Generate PDF summary (if requested)
+        if generate_pdf:
+            try:
+                from summary_render import render_summary_pdf
+                pdf_summary_path = render_summary_pdf(json_path)
+                print(f"[OK] PDF summary created: {pdf_summary_path.name}")
+            except ImportError:
+                print(f"[WARN] summary_render module not available. Install reportlab to generate PDF summaries.")
+            except Exception as e:
+                print(f"[WARN] Failed to generate PDF summary: {e}")
         
         return summary
         
@@ -259,16 +321,26 @@ def _call_openai_api(text: str) -> dict:
         "- Do NOT explain methodology.\n"
         "- Do NOT include commentary outside the requested JSON.\n"
         "- Output MUST be valid JSON only (no markdown, no prose, no code blocks).\n"
-        "- Detect specific products mentioned: gold, silver, oil, bitcoin, rates, USD, EUR, ES, NQ, etc.\n"
-        "- Include product categories: Metals, Energy, Crypto, Rates, FX, Equity Indices, Agriculture."
+        "- Detect specific products mentioned: gold, silver, oil, bitcoin, rates, USD, EUR, ES, NQ, etc.\n\n"
+        "SCORING REQUIREMENTS:\n"
+        "- Assess how useful this summary is for day trading, swing trading, or understanding market conditions.\n"
+        "- Assign a summary_score_0_10 (0-10 scale): 0=useless, 5=somewhat helpful, 10=extremely actionable.\n"
+        "- Consider: specificity of levels, timing precision, catalyst clarity, risk definition, confidence.\n"
+        "- Assign a chart_score_0_3 (0-3 scale) based on chart/visual density:\n"
+        "  0 = no charts/visuals\n"
+        "  1 = minimal charts (1-2 simple charts)\n"
+        "  2 = moderate charts (3-5 charts or some complex visuals)\n"
+        "  3 = heavy charts (6+ charts, complex technical analysis, or chart-driven content)"
     )
 
     user_prompt = (
         "Create a trader-focused summary of the document below.\n\n"
         "Return STRICT JSON with exactly the following structure:\n\n"
         "{\n"
+        '  "summary_score_0_10": integer (0-10, how useful for trading),\n'
+        '  "chart_score_0_3": integer (0-3, visual/chart density),\n'
         '  "overall_bias": "bullish | bearish | neutral",\n'
-        '  "products": [list of specific products mentioned: "gold", "silver", "oil", "bitcoin", "rates", "USD", "ES", etc.],\n'
+        '  "products": [list of specific products: "gold", "silver", "oil", "bitcoin", "rates", "USD", "ES", etc.],\n'
         '  "per_product": {\n'
         '    "PRODUCT_NAME": {\n'
         '      "bias": "bullish | bearish | neutral",\n'
@@ -286,6 +358,9 @@ def _call_openai_api(text: str) -> dict:
         "  ],\n"
         '  "time_horizon": "intraday | 1-3d | 1-2w"\n'
         "}\n\n"
+        "SCORING GUIDANCE:\n"
+        "- summary_score_0_10: Consider specificity, timing, levels, catalysts. 0=no trading value, 10=highly actionable.\n"
+        "- chart_score_0_3: Based on chart/figure density: 0=none, 1=few, 2=moderate, 3=heavy.\n\n"
         "CONSTRAINTS:\n"
         "- If a field cannot be supported by the text, return an empty array or null.\n"
         "- Do not fabricate levels, products, or catalysts.\n"

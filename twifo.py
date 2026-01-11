@@ -4,6 +4,7 @@ import json
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
+from typing import Optional
 
 # compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
@@ -319,38 +320,46 @@ def pdf_contains(filepath: str, term_lower: str) -> bool:
     return pdf_contains_cached(filepath, term_lower)
 
 
-def has_summary_file(filepath: str) -> tuple[bool, str]:
+def has_summary_file(filepath: str) -> tuple[bool, str, str]:
     """
     Check if summary file exists for given PDF.
-    Returns: (exists: bool, summary_filename: str)
+    Returns: (has_pdf: bool, pdf_filename: str, json_filename: str)
     
-    Note: Returns just the filename (not full path) for URL generation.
-    Summary must exist in same directory as source PDF.
-    Checks for both __sum.json (new standard) and .summary.json (legacy) formats.
+    Prefers PDF summaries over JSON. Returns both filenames so we can:
+    - Link to PDF if it exists
+    - Generate PDF from JSON if JSON exists but PDF doesn't
+    
+    Note: Returns just the filenames (not full paths) for URL generation.
     """
     if not filepath.endswith('.pdf'):
-        return False, ""
+        return False, "", ""
     
     # Build summary paths (same directory as source)
     base_path = filepath[:-4]  # Remove .pdf extension
     dir_path = os.path.dirname(filepath)
+    base_name = os.path.basename(base_path)
     
-    # Check for __sum.json (new standard format)
-    summary_json_new = os.path.join(dir_path, f"{os.path.basename(base_path)}__sum.json")
-    if os.path.isfile(summary_json_new):
-        return True, f"{os.path.basename(base_path)}__sum.json"
+    # Check for __sum.pdf (preferred format)
+    summary_pdf = os.path.join(dir_path, f"{base_name}__sum.pdf")
+    pdf_filename = f"{base_name}__sum.pdf" if os.path.isfile(summary_pdf) else ""
     
-    # Check for .summary.json (legacy format from test_summarize_one.py)
+    # Check for __sum.json (source for PDF generation)
+    summary_json_new = os.path.join(dir_path, f"{base_name}__sum.json")
+    json_filename = f"{base_name}__sum.json" if os.path.isfile(summary_json_new) else ""
+    
+    # Check for legacy .summary.json
     summary_json_legacy = f"{base_path}.summary.json"
-    if os.path.isfile(summary_json_legacy):
-        return True, os.path.basename(summary_json_legacy)
+    if not json_filename and os.path.isfile(summary_json_legacy):
+        json_filename = os.path.basename(summary_json_legacy)
     
-    # Fallback to PDF format (oldest legacy)
-    summary_pdf = f"{base_path}__sum.pdf"
-    if os.path.isfile(summary_pdf):
-        return True, os.path.basename(summary_pdf)
+    has_pdf = bool(pdf_filename)
+    has_json = bool(json_filename)
     
-    return False, ""
+    # Return True if we have either PDF or JSON (JSON can be converted to PDF)
+    if has_pdf or has_json:
+        return True, pdf_filename, json_filename
+    
+    return False, "", ""
 
 
 def load_product_categories_from_summary(summary_path: str) -> dict:
@@ -371,16 +380,58 @@ def load_product_categories_from_summary(summary_path: str) -> dict:
         return {}
 
 
+def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]:
+    """
+    Load summary_score_0_10 and chart_score_0_3 from summary JSON file.
+    Returns: (summary_score, chart_score) or (None, None) if not found/invalid
+    """
+    try:
+        if not os.path.exists(summary_path):
+            return None, None
+        
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            summary = json.load(f)
+        
+        # Get summary score (0-10)
+        summary_score = summary.get("summary_score_0_10")
+        if summary_score is not None:
+            try:
+                summary_score = int(summary_score)
+                summary_score = max(0, min(10, summary_score))
+            except (ValueError, TypeError):
+                summary_score = None
+        
+        # Get chart score (0-3)
+        chart_score = summary.get("chart_score_0_3")
+        if chart_score is not None:
+            try:
+                chart_score = int(chart_score)
+                chart_score = max(0, min(3, chart_score))
+            except (ValueError, TypeError):
+                chart_score = None
+        
+        return summary_score, chart_score
+    except Exception:
+        return None, None
+
+
 def format_product_categories(categories: dict) -> str:
     """
-    Format product categories dict as display string.
-    Example: {"Metals": ["gold"], "Energy": ["oil"]} -> "Metals, Energy"
+    Format product categories dict as compact display string.
+    Example: {"E": ["CL", "NG"], "M": ["GC"]} -> "E (CL, NG), M (GC)"
     """
     if not categories:
         return "—"
     
-    category_names = list(categories.keys())
-    return ", ".join(sorted(category_names))
+    parts = []
+    for cat_code, tickers in sorted(categories.items()):
+        if isinstance(tickers, list) and tickers:
+            tickers_str = ", ".join(tickers)
+            parts.append(f"{cat_code} ({tickers_str})")
+        elif tickers:
+            parts.append(f"{cat_code} ({tickers})")
+    
+    return ", ".join(parts) if parts else "—"
 
 ############################
 # 3) INITIALIZE APP
@@ -637,8 +688,10 @@ files_layout = html.Div(
                         {"id": "date",             "name": "Date"},
                         {"id": "title",            "name": "Title"},
                         {"id": "product_categories", "name": "Categories"},
-                        {"id": "summary",          "name": "Summary", "presentation": "markdown"},
                         {"id": "view",             "name": "View",    "presentation": "markdown"},
+                        {"id": "summary",          "name": "Summary", "presentation": "markdown"},
+                        {"id": "summary_score",    "name": "Score",   "type": "numeric"},
+                        {"id": "chart_score",      "name": "Charts",  "type": "numeric"},
                     ],
                     data=[],
                     filter_action="native",
@@ -653,7 +706,56 @@ files_layout = html.Div(
                         {"if": {"row_index": "odd"},  "backgroundColor": ROW_ODD_COLOR},
                         {"if": {"row_index": "even"}, "backgroundColor": ROW_EVEN_COLOR},
 
-                        # 2) then your today‐rule *last*
+                        # 2) Summary/Score column color coding based on score (0-10 scale)
+                        # 0-2: Dark red
+                        {
+                            "if": {"filter_query": "{summary_score} <= 2 && {summary_score} >= 0", "column_id": "summary"},
+                            "backgroundColor": "#8B0000",  # Dark red
+                        },
+                        {
+                            "if": {"filter_query": "{summary_score} <= 2 && {summary_score} >= 0", "column_id": "summary_score"},
+                            "backgroundColor": "#8B0000",
+                            "color": "white"
+                        },
+                        # 3-4: Red-orange
+                        {
+                            "if": {"filter_query": "{summary_score} > 2 && {summary_score} <= 4", "column_id": "summary"},
+                            "backgroundColor": "#FF4500",  # Orange-red
+                        },
+                        {
+                            "if": {"filter_query": "{summary_score} > 2 && {summary_score} <= 4", "column_id": "summary_score"},
+                            "backgroundColor": "#FF4500",
+                        },
+                        # 5: Yellow
+                        {
+                            "if": {"filter_query": "{summary_score} = 5", "column_id": "summary"},
+                            "backgroundColor": "#FFD700",  # Gold/Yellow
+                        },
+                        {
+                            "if": {"filter_query": "{summary_score} = 5", "column_id": "summary_score"},
+                            "backgroundColor": "#FFD700",
+                        },
+                        # 6-7: Yellow-green
+                        {
+                            "if": {"filter_query": "{summary_score} > 5 && {summary_score} <= 7", "column_id": "summary"},
+                            "backgroundColor": "#9ACD32",  # Yellow-green
+                        },
+                        {
+                            "if": {"filter_query": "{summary_score} > 5 && {summary_score} <= 7", "column_id": "summary_score"},
+                            "backgroundColor": "#9ACD32",
+                        },
+                        # 8-10: Green
+                        {
+                            "if": {"filter_query": "{summary_score} > 7 && {summary_score} <= 10", "column_id": "summary"},
+                            "backgroundColor": "#228B22",  # Forest green
+                        },
+                        {
+                            "if": {"filter_query": "{summary_score} > 7 && {summary_score} <= 10", "column_id": "summary_score"},
+                            "backgroundColor": "#228B22",
+                            "color": "white"
+                        },
+
+                        # 3) then your today‐rule *last* (overrides summary colors)
                         {
                             "if": {"filter_query": f'{{date}} eq "{TODAY}"'},
                             "backgroundColor": "#e6f7ff",
@@ -935,8 +1037,11 @@ def update_file_table(
             {"id": "frequency", "name": "Frequency", "type": "text"},
             {"id": "date", "name": "Date", "type": "datetime"},
             {"id": "title", "name": "Title", "type": "text"},
-            {"id": "summary", "name": "Summary", "presentation": "markdown"},
+            {"id": "product_categories", "name": "Categories", "type": "text"},
             {"id": "view", "name": "View", "presentation": "markdown"},
+            {"id": "summary", "name": "Summary", "presentation": "markdown"},
+            {"id": "summary_score", "name": "Score", "type": "numeric"},
+            {"id": "chart_score", "name": "Charts", "type": "numeric"},
         ]
         return cols, [], "", {"visibility": "hidden"}, "", {"width": "0%"}, "0%"
     
@@ -968,15 +1073,17 @@ def update_file_table(
         # Fallback: if no options yet, assume all selected (show everything)
         all_products_selected = True
 
-    # 2) Build columns (dynamically - includes summary and product categories for all users)
+    # 2) Build columns (dynamically - reordered: Firm, Frequency, Date, Title, Categories, View, Summary, Score, Charts)
     cols = [
-        {"id": "firm",             "name": "Firm",      "type": "text"},
-        {"id": "frequency",        "name": "Frequency", "type": "text"},
-        {"id": "date",             "name": "Date",      "type": "datetime"},
-        {"id": "title",            "name": "Title",     "type": "text"},
-        {"id": "product_categories", "name": "Categories", "type": "text"},  # NEW: Product categories
-        {"id": "summary",          "name": "Summary",   "presentation": "markdown"},
-        {"id": "view",             "name": "View",      "presentation": "markdown"},
+        {"id": "firm",             "name": "Firm",       "type": "text"},
+        {"id": "frequency",        "name": "Frequency",  "type": "text"},
+        {"id": "date",             "name": "Date",       "type": "datetime"},
+        {"id": "title",            "name": "Title",      "type": "text"},
+        {"id": "product_categories", "name": "Categories", "type": "text"},
+        {"id": "view",             "name": "View",       "presentation": "markdown"},
+        {"id": "summary",          "name": "Summary",    "presentation": "markdown"},
+        {"id": "summary_score",    "name": "Score",      "type": "numeric"},
+        {"id": "chart_score",      "name": "Charts",     "type": "numeric"},
     ]
     if login_user == "iwill":
         cols.insert(4, {"id": "subject",  "name": "Subject",  "type": "text"})
@@ -1059,13 +1166,23 @@ def update_file_table(
             full_path = os.path.join(dpath, fname)
             
             # Check for summary (do this ONCE during candidate building, not later)
-            has_sum, sum_filename = has_summary_file(full_path)
+            has_sum, pdf_filename, json_filename = has_summary_file(full_path)
             
-            # Load product categories from summary JSON if available
+            # Prefer PDF summary, fallback to JSON (which can be converted to PDF)
+            summary_filename = pdf_filename if pdf_filename else json_filename
+            
+            # Load product categories and scores from summary JSON if available
             product_categories = {}
-            if has_sum and sum_filename.endswith('.json'):
-                summary_path = os.path.join(dpath, sum_filename)
-                product_categories = load_product_categories_from_summary(summary_path)
+            summary_score = None
+            chart_score = None
+            if json_filename:
+                json_path = os.path.join(dpath, json_filename)
+                product_categories = load_product_categories_from_summary(json_path)
+                summary_score, chart_score = load_summary_score(json_path)
+            elif pdf_filename:
+                # If only PDF exists, try to load from corresponding JSON
+                json_path = os.path.join(dpath, json_filename)  # This will be empty, so skip
+                # We can't load score from PDF easily, so leave it None
             
             candidate_files.append({
                 'path': full_path,
@@ -1077,8 +1194,12 @@ def update_file_table(
                 'frequency': frequency,
                 'subj': subj,
                 'has_summary': has_sum,
-                'summary_filename': sum_filename,
-                'product_categories': product_categories  # NEW: Product categories from summary
+                'summary_pdf_filename': pdf_filename,      # PDF summary (preferred)
+                'summary_json_filename': json_filename,    # JSON summary (source)
+                'summary_filename': summary_filename,      # Which one to link to (PDF preferred)
+                'product_categories': product_categories,
+                'summary_score': summary_score,           # Score for color coding (0-10)
+                'chart_score': chart_score                # Chart score (0-3)
             })
 
     # Batch process PDF content search if needed
@@ -1117,14 +1238,25 @@ def update_file_table(
         safe = urllib.parse.quote(file_info['fname'])
         view_md = f"[View](/view?file={safe})"
         
-        # Summary link (using cached detection)
+        # Summary link - link to PDF summary (__sum.pdf)
+        summary_score = file_info.get('summary_score')  # 0-10 or None
+        chart_score = file_info.get('chart_score')      # 0-3 or None
+        
         if file_info['has_summary']:
-            safe_sum = urllib.parse.quote(file_info['summary_filename'])
-            summary_md = f"[📄 View](/view?file={safe_sum})"
+            # Prefer PDF summary
+            if file_info.get('summary_pdf_filename'):
+                safe_sum = urllib.parse.quote(file_info['summary_pdf_filename'])
+                summary_md = f"[📄 View](/view?file={safe_sum})"
+            elif file_info.get('summary_json_filename'):
+                # Only JSON exists - link to JSON (but this shouldn't happen with new autorun)
+                safe_sum = urllib.parse.quote(file_info['summary_json_filename'])
+                summary_md = f"[📋 JSON](/view?file={safe_sum})"
+            else:
+                summary_md = "—"
         else:
             summary_md = "—"
         
-        # Format product categories for display
+        # Format product categories for display (compact ticker format)
         product_categories_str = format_product_categories(file_info.get('product_categories', {}))
         
         row = {
@@ -1132,9 +1264,11 @@ def update_file_table(
             "frequency":         file_info['frequency'],
             "date":              file_info['date_fmt'],
             "title":             file_info['title_str'],
-            "product_categories": product_categories_str,  # NEW: Product categories
-            "summary":           summary_md,
+            "product_categories": product_categories_str,
             "view":              view_md,
+            "summary":           summary_md,
+            "summary_score":     summary_score if summary_score is not None else "",  # Empty if no summary
+            "chart_score":       chart_score if chart_score is not None else "",      # Empty if no summary
             "is_today":          file_info['is_today']
         }
         if login_user == "iwill":
