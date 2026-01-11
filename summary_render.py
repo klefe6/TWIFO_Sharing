@@ -231,9 +231,14 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> P
             'CategoriesText', parent=body_style, fontSize=10, spaceAfter=12
         )))
         story.append(Spacer(1, 0.1*inch))
+    
+    # Overall Bias and Time Horizon
+    bias_table_data = []
     overall_bias = summary.get("overall_bias", "Not provided")
     time_horizon = summary.get("time_horizon", "Not provided")
-    bias_table_data.append(["<b>Overall Bias:</b>", overall_bias.capitalize()])
+    if overall_bias and overall_bias != "Not provided":
+        overall_bias = overall_bias.capitalize()
+    bias_table_data.append(["<b>Overall Bias:</b>", overall_bias])
     bias_table_data.append(["<b>Time Horizon:</b>", time_horizon])
     
     bias_table = Table(bias_table_data, colWidths=[1.5*inch, 5*inch])
