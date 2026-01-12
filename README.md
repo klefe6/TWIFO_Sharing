@@ -240,6 +240,78 @@ TWIFO_Sharing/
 - **Fallback Mechanisms**: Alternative functionality when needed
 - **Logging System**: Comprehensive error logging
 
+## Rollup System
+
+### **Overview**
+The rollup system creates daily and weekly summaries from article summaries (JSON/TXT files only - no PDFs or OCR).
+
+### **File Naming Conventions**
+- **Daily Rollups**: `ROLLUP_DAILY_YYYYMMDD__sum.json` and `ROLLUP_DAILY_YYYYMMDD__sum.txt`
+  - Example: `ROLLUP_DAILY_20260111__sum.json`
+- **Weekly Rollups**: `ROLLUP_WEEKLY_YYYYMMDD__sum.json` and `ROLLUP_WEEKLY_YYYYMMDD__sum.txt`
+  - Example: `ROLLUP_WEEKLY_20260106__sum.json` (Monday date)
+  - Where YYYYMMDD is ISO date with no dashes
+
+### **Daily Rollups**
+Generate a daily rollup for a specific date (requires >= 3 article summaries):
+
+```bash
+python generate_rollup_clean.py daily YYYY-MM-DD
+# or
+python generate_rollup_clean.py daily YYYYMMDD
+```
+
+### **Weekly Rollups**
+Generate a weekly rollup for a date range (defaults to Mon-Fri if only start date provided):
+
+```bash
+python generate_rollup_clean.py weekly YYYY-MM-DD [YYYY-MM-DD]
+# or
+python generate_rollup_clean.py weekly YYYYMMDD [YYYYMMDD]
+```
+
+### **Backfilling Rollups**
+Backfill daily rollups for a date range:
+
+```bash
+python backfill_rollups.py --start YYYY-MM-DD --end YYYY-MM-DD
+```
+
+Backfill weekly rollups for Mondays in a date range:
+
+```bash
+python backfill_rollups.py --start YYYY-MM-DD --end YYYY-MM-DD --weekly
+```
+
+### **Weekly Rollup Automation**
+Weekly rollups run every Monday at 12:05am ET and cover the previous Monday-Friday.
+
+To compute the previous Mon-Fri range:
+- Uses America/New_York timezone
+- If today is Monday before 12:05am ET, uses the week before last
+- Otherwise uses last week (Mon-Fri)
+
+Schedule with Windows Task Scheduler:
+```
+Program: python.exe
+Arguments: "C:\Program Files\Coding Projects\TWIFO_Sharing\run_weekly_rollup.py"
+Trigger: Weekly on Mondays at 12:05am ET
+```
+
+### **Rollup Schema**
+- Daily and weekly rollups share the same schema
+- Only `meta.rollup_kind` and `meta.week_range` differ
+- Trade ideas use timeframe buckets: `d_1_3`, `w_1_2`, `gt_2w`, `watchlist_only`
+- See `rollup_schema.py` for full schema documentation
+
+### **Validation**
+Validate rollup JSON files:
+
+```bash
+python rollup_validate.py <rollup_json_file>
+python rollup_validate.py --dir <directory>
+```
+
 ## Configuration
 
 ### **Environment Variables**

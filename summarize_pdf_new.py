@@ -104,113 +104,63 @@ def _failed_stub(pdf_path: Path, reason: str, extraction: dict, meta: dict) -> d
     }
 
 def render_sum_txt(sum_json: dict) -> str:
-    """
-    Render summary in Egypt-format (consistent single-article format).
-    """
-    from datetime import datetime
-    
+    """Human-readable TXT mirror of the JSON."""
     meta = sum_json.get("meta", {})
     prov = meta.get("provider", "")
-    date_str = meta.get("published_date", "")
+    date = meta.get("published_date", "")
     horizon = meta.get("horizon", "")
     title = meta.get("title", "")
-    theme = meta.get("theme", "")
-    products = meta.get("products", [])
-    model = meta.get("model", "gpt-4o-mini")
-    generated_at = meta.get("generated_at_iso", "")
-    
-    # Format date for display
-    try:
-        if len(date_str) == 8:
-            dt_obj = datetime.strptime(date_str, "%Y%m%d")
-            date_display = dt_obj.strftime("%b %d, %Y")
-        else:
-            date_display = date_str
-    except:
-        date_display = date_str
-    
-    # Format horizon for display
-    horizon_map = {
-        "d": "0–3D",
-        "w": "1–2W",
-        "m": ">2W",
-        "q": ">2W",
-        "y": ">2W",
-        "u": "1–2W"  # Unknown defaults to 1-2W
-    }
-    horizon_display = horizon_map.get(horizon.lower(), horizon)
-    
-    # Get score (default to 0 if missing)
-    score = 0
-    if "self_evaluation" in sum_json:
-        score = sum_json["self_evaluation"].get("summary_score_0_10", 0)
-    elif "scan" in sum_json:
-        score = sum_json["scan"].get("score", {}).get("summary_score_0_10", 0)
-    else:
-        score = sum_json.get("summary_score_0_10", 0)
-    
-    # Products line
-    products_line = ", ".join(products) if products else "(none)"
-    
-    def bullet_lines(items: list, prefix="• "):
-        """Format bullets without sources (cleaner)."""
+
+    def bullet_lines(items: list, prefix="- "):
         out = []
         for it in items:
             if isinstance(it, dict):
-                text = it.get('text', '').strip()
-                if text:
-                    out.append(f"{prefix}{text}")
+                src = it.get("sources", [])
+                src_txt = f" ({', '.join(src)})" if src else ""
+                out.append(f"{prefix}{it.get('text','').strip()}{src_txt}")
             else:
-                text = str(it).strip()
-                if text:
-                    out.append(f"{prefix}{text}")
-        return "\n".join(out) if out else f"{prefix}(none)"
-    
-    s = sum_json.get("sections", {})
-    
-    # Format actionable (trade ideas)
-    actionable_items = s.get("trade_ideas", [])
-    actionable_lines = []
-    for item in actionable_items:
-        if isinstance(item, dict):
-            text = item.get("text", "")
-            if not text:
-                # Build from structured fields
-                direction = item.get("direction", "")
-                instrument = item.get("instrument", "")
-                trigger = item.get("trigger", "")
-                horizon_val = item.get("horizon", "")
-                text = f"{direction.capitalize()} {instrument} {trigger} ({horizon_val})"
-            actionable_lines.append(f"• {text}")
-        else:
-            actionable_lines.append(f"• {str(item)}")
-    
-    actionable_text = "\n".join(actionable_lines) if actionable_lines else "• (none)"
-    
-    # Format generated timestamp
-    gen_display = generated_at.split("T")[0] if "T" in generated_at else generated_at
-    
-    return f"""{title}
-{prov}  {date_display}  {horizon_display}  {score}/10
-Theme: {theme}
-Products: {products_line}
+                out.append(f"{prefix}{str(it).strip()}")
+        return "\n".join(out)
 
-== TL;DR ==
+    s = sum_json.get("sections", {})
+    trade_ideas = s.get("trade_ideas", [])
+
+    trade_lines = []
+    for ti in trade_ideas:
+        trade_lines.append(
+            f"- {ti.get('direction','').upper()} {ti.get('instrument','')} | "
+            f"{ti.get('trigger','')} | horizon={ti.get('horizon','')} | "
+            f"conf={ti.get('confidence_0_100','')} | sources={','.join(ti.get('sources',[]))}"
+        )
+
+    return f"""TITLE: {title}
+PROVIDER: {prov}
+DATE: {date}
+HORIZON: {horizon}
+
+TL;DR
 {bullet_lines(s.get("tldr", []))}
 
-== KEY DATA / CONTEXT ==
+WHAT OCCURRED
 {bullet_lines(s.get("what_occurred", []))}
 
-== FORWARD WATCH / EXPECTATIONS ==
+FORWARD WATCH
 {bullet_lines(s.get("forward_watch", []))}
 
-Generated: {gen_display}  Model: {model}
+TRADE IDEAS
+{'\n'.join(trade_lines) if trade_lines else '- (none)'}
 
-== ACTIONABLE ==
-{actionable_text}
+WARNINGS
+{bullet_lines(s.get("warnings", []))}
 
-== TIPS & REMINDERS ==
+TIPS & REMINDERS
 {bullet_lines(s.get("tips_reminders", []))}
+
+CROSS-ASSET IMPACTS
+{bullet_lines(s.get("cross_asset_impacts", []))}
+
+SCENARIOS
+{bullet_lines(s.get("scenarios", []))}
 """
 
 # =========================
@@ -373,24 +323,10 @@ def llm_summarize_to_json(
     )
     
     user_prompt = (
-        "Create a trader-focused summary in STRICT JSON format:\n"
-        '{"theme": "<1 sentence max 22 words>", '
-        '"tldr": ["<factual statement 1>", ...], '
-        '"key_data": ["<numeric fact 1 with % or levels>", ...], '
-        '"forward_watch": ["<future catalyst/event/level to watch>", ...], '
-        '"actionable": ["<Direction> <Asset> if/when <Trigger> (<Timeframe>)", ...], '
-        '"tips": ["<educational reminder>", ...], '
-        '"products": ["<product1>", ...], '
-        '"score_0_10": 0}\n\n'
-        'RULES:\n'
-        '- theme: Core driver in <=22 words\n'
-        '- tldr: 3-5 factual bullets (NO advice verbs)\n'
-        '- key_data: 3-8 numeric facts with % or levels\n'
-        '- forward_watch: 3-8 future catalysts/events (OK to use "monitor/watch")\n'
-        '- actionable: 3-8 bullets with format "Long/Short X if Y (0-3D/1-2W/>2W)"\n'
-        '- tips: 2-6 educational reminders only\n'
-        '- products: List of relevant products/assets\n'
-        '- score_0_10: Quality score 0-10\n\n'
+        "Create a trader-focused summary. Return STRICT JSON with structure:\n"
+        '{"core_summary": {"tldr": [], "actionable": [], "tips_and_reminders": []}, '
+        '"per_product": {}, "self_evaluation": {"summary_score_0_10": 0, "score_breakdown": {}}, '
+        '"time_separation": {}, "market_framing": {"products": []}}\n\n'
         f"DOCUMENT TEXT:\n<<<\n{text}\n>>>"
     )
     
@@ -432,35 +368,42 @@ def llm_summarize_to_json(
     
     api_response = json.loads(cleaned.strip())
     
-    # Convert API response to twifo.sum.v1 schema (Egypt-format)
+    # Convert API response to twifo.sum.v1 schema
     provider = meta.get("provider", "O")
     published_date = meta.get("published_date", "")
     horizon = meta.get("horizon", "")
+    products = meta.get("products", [])
     
-    # Extract from new streamlined API response
-    theme = api_response.get("theme", "")
-    tldr = api_response.get("tldr", [])
-    key_data = api_response.get("key_data", [])
-    forward_watch = api_response.get("forward_watch", [])
-    actionable = api_response.get("actionable", [])
-    tips = api_response.get("tips", [])
-    products = api_response.get("products", []) or meta.get("products", [])
-    score = api_response.get("score_0_10", 0)
+    # Extract from API response
+    core_summary = api_response.get("core_summary", {})
+    per_product = api_response.get("per_product", {})
+    market_framing = api_response.get("market_framing", {})
     
-    # Fallback to old schema if new fields missing
-    if not tldr:
-        core_summary = api_response.get("core_summary", {})
-        tldr = core_summary.get("tldr", [])
-        key_data = core_summary.get("actionable", [])[:8]
-        tips = core_summary.get("tips_and_reminders", [])
-    
-    # Ensure theme exists
-    if not theme and tldr:
-        theme = tldr[0] if isinstance(tldr[0], str) else tldr[0].get("text", "")
-        # Truncate to 22 words
-        words = theme.split()
-        if len(words) > 22:
-            theme = " ".join(words[:22])
+    # Build trade ideas from per_product
+    trade_ideas = []
+    for product_name, product_data in per_product.items():
+        direction = product_data.get("bias", "neutral")
+        if direction == "neutral":
+            continue  # Skip neutral - not a trade idea
+        
+        # Extract trigger from forward_catalysts
+        triggers = product_data.get("forward_catalysts", [])
+        trigger = triggers[0] if triggers else "Not specified"
+        
+        # Determine horizon from time_separation or default
+        time_sep = api_response.get("time_separation", {})
+        horizon_val = horizon or "1–3D"  # Default
+        
+        trade_ideas.append({
+            "direction": "long" if "bull" in direction.lower() else "short",
+            "instrument": product_name,
+            "setup": "; ".join(product_data.get("past_drivers", [])[:2]),
+            "trigger": trigger,
+            "horizon": horizon_val,
+            "invalidation": "; ".join(product_data.get("risks", [])[:2]),
+            "confidence_0_100": product_data.get("confidence_0_100", 50),
+            "sources": [provider]
+        })
     
     return {
         "schema_version": SCHEMA_SUM_V1,
@@ -470,8 +413,7 @@ def llm_summarize_to_json(
             "provider": provider,
             "published_date": published_date,
             "horizon": horizon,
-            "products": products,
-            "theme": theme,
+            "products": products or market_framing.get("products", []),
             "generated_at_iso": _iso_now(),
             "model": model
         },
@@ -479,22 +421,20 @@ def llm_summarize_to_json(
             "header_pills": [
                 {"text": provider, "type": "provider"},
                 {"text": published_date, "type": "date"},
-                {"text": horizon, "type": "horizon"},
-                {"text": f"{score}/10", "type": "score"}
+                {"text": horizon, "type": "horizon"}
             ]
         },
         "extraction": meta.get("extraction", {}),
         "sections": {
-            "tldr": [{"text": t, "sources": [provider]} for t in (tldr[:5] if isinstance(tldr, list) else [])],
-            "what_occurred": [{"text": t, "sources": [provider]} for t in (key_data[:8] if isinstance(key_data, list) else [])],
-            "forward_watch": [{"text": t, "sources": [provider]} for t in (forward_watch[:8] if isinstance(forward_watch, list) else [])],
-            "trade_ideas": [{"text": t, "sources": [provider]} for t in (actionable[:8] if isinstance(actionable, list) else [])],
+            "tldr": [{"text": t, "sources": [provider]} for t in core_summary.get("tldr", [])],
+            "what_occurred": [{"text": t, "sources": [provider]} for t in core_summary.get("actionable", [])[:5]],
+            "forward_watch": [{"text": t, "sources": [provider]} for t in core_summary.get("tips_and_reminders", [])[:5]],
+            "trade_ideas": trade_ideas,
             "warnings": [],
-            "tips_reminders": [{"text": t, "sources": [provider]} for t in (tips[:6] if isinstance(tips, list) else [])],
+            "tips_reminders": [{"text": t, "sources": [provider]} for t in core_summary.get("tips_and_reminders", [])[5:]],
             "cross_asset_impacts": [],
             "scenarios": []
-        },
-        "summary_score_0_10": score
+        }
     }
 
 def summarize_text(
@@ -609,16 +549,7 @@ def summarize_pdf(
     except Exception as e:
         sum_json = _failed_stub(pdf_path, reason=str(e), extraction=extraction, meta=meta)
 
-    # Validate and fix format
-    try:
-        from format_validator import validate_article_summary, fix_summary_format
-        is_valid, violations = validate_article_summary(sum_json)
-        if violations:
-            print(f"[FORMAT] Fixing {len(violations)} format issues...")
-            sum_json = fix_summary_format(sum_json)
-    except ImportError:
-        pass  # Validator not available, skip
-    
     _write_json(json_path, sum_json)
     _write_txt(txt_path, render_sum_txt(sum_json))
     return sum_json
+

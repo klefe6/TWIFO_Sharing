@@ -48,7 +48,8 @@ month_abbrev = month[:3]  # e.g. "June" → "Jun"
 
 DEFAULT_KEEP = [
     "Annual","Weekly","Monthly","Quarterly",
-    "Commodity","Commodities","Gold","Bitcoin","SOFR","Interest Rates", "CTAs", "CFTC", "CME", "BNY"
+    "Commodity","Commodities","Gold","Bitcoin","SOFR","Interest Rates", "CTAs", "CFTC", "CME", "BNY",
+    "Macro Insight","Metals"
 ]
 DEFAULT_SKIP = [
     "Earnings",          "Earnings_",          "Earnings-",

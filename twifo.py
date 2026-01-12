@@ -1,10 +1,12 @@
 import os
+import re
 import datetime
 import json
 import hashlib
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, List, Dict
 
 # compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
@@ -13,6 +15,7 @@ import urllib.parse
 
 import dash
 from dash import dcc, html, dash_table, Input, Output, State, ctx
+from dash.exceptions import PreventUpdate
 from flask import request, send_from_directory
 from PyPDF2 import PdfReader  # for in-PDF keyword search (beta)
 
@@ -383,6 +386,8 @@ def load_product_categories_from_summary(summary_path: str) -> dict:
 def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]:
     """
     Load summary_score_0_10 and chart_score_0_3 from summary JSON file.
+    Supports BOTH old and new (Option B) schema formats for backward compatibility.
+    
     Returns: (summary_score, chart_score) or (None, None) if not found/invalid
     """
     try:
@@ -392,8 +397,23 @@ def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]
         with open(summary_path, 'r', encoding='utf-8') as f:
             summary = json.load(f)
         
-        # Get summary score (0-10)
-        summary_score = summary.get("summary_score_0_10")
+        summary_score = None
+        chart_score = None
+        
+        # Try new Option B schema first (scan.score.summary_score_0_10)
+        if "scan" in summary and isinstance(summary["scan"], dict):
+            score = summary["scan"].get("score", {})
+            if isinstance(score, dict):
+                summary_score = score.get("summary_score_0_10")
+                chart_score = score.get("chart_score_0_3")
+        
+        # Fallback to old schema (top-level summary_score_0_10) or backward compat fields
+        if summary_score is None:
+            summary_score = summary.get("summary_score_0_10")
+        if chart_score is None:
+            chart_score = summary.get("chart_score_0_3")
+        
+        # Validate and clamp scores
         if summary_score is not None:
             try:
                 summary_score = int(summary_score)
@@ -401,8 +421,6 @@ def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]
             except (ValueError, TypeError):
                 summary_score = None
         
-        # Get chart score (0-3)
-        chart_score = summary.get("chart_score_0_3")
         if chart_score is not None:
             try:
                 chart_score = int(chart_score)
@@ -414,6 +432,285 @@ def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]
     except Exception:
         return None, None
 
+
+def load_extraction_status(summary_path: str) -> tuple[str, Optional[int]]:
+    """
+    Load extraction status and quality from summary JSON file.
+    
+    Returns: (status, quality_score) where:
+        - status: "ok" | "failed" | "unknown"
+        - quality_score: extraction_quality_0_100 (0-100) or None
+    """
+    try:
+        if not os.path.exists(summary_path):
+            return "unknown", None
+        
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            summary = json.load(f)
+        
+        # Check meta.extraction.status
+        meta = summary.get("meta", {})
+        extraction = meta.get("extraction", {})
+        status = extraction.get("status", "unknown")
+        quality = extraction.get("extraction_quality_0_100")
+        
+        # Validate status
+        if status not in ["ok", "failed", "unknown"]:
+            status = "unknown"
+        
+        # Validate quality
+        if quality is not None:
+            try:
+                quality = int(quality)
+                quality = max(0, min(100, quality))
+            except (ValueError, TypeError):
+                quality = None
+        
+        return status, quality
+    except Exception:
+        return "unknown", None
+
+
+def load_timeframe_from_summary(json_path: str) -> Optional[str]:
+    """
+    Load time_horizon/timeframe from summary JSON file.
+    Supports both Style B and Option B schemas.
+    
+    Returns: time_horizon string (e.g., "1-2w", "1-3d") or None if not found
+    """
+    try:
+        if not os.path.exists(json_path):
+            return None
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            summary = json.load(f)
+        
+        # Try Style B schema (market_framing.time_horizon)
+        meta = summary.get("meta", {})
+        market_framing = meta.get("market_framing", {})
+        if market_framing:
+            time_horizon = market_framing.get("time_horizon")
+            if time_horizon:
+                return time_horizon
+        
+        # Fallback to top-level (for backward compatibility)
+        time_horizon = summary.get("time_horizon")
+        if time_horizon:
+            return time_horizon
+        
+        return None
+    except Exception:
+        return None
+
+
+def parse_rollup_filename(fname: str) -> Optional[dict]:
+    """
+    Parse rollup filename to extract metadata.
+    Returns dict with kind, date info, or None if not a rollup.
+    New pattern: ROLLUP_DAILY_YYYYMMDD__sum.json and ROLLUP_WEEKLY_YYYYMMDD__sum.json
+    """
+    # Daily: ROLLUP_DAILY_YYYYMMDD__sum.json
+    daily_match = re.match(r'ROLLUP_DAILY_(\d{8})__sum\.json', fname)
+    if daily_match:
+        date_yyyymmdd = daily_match.group(1)
+        try:
+            dt = datetime.datetime.strptime(date_yyyymmdd, "%Y%m%d")
+            return {
+                "kind": "rollup_daily",
+                "date": dt.date(),
+                "date_yyyymmdd": date_yyyymmdd,
+            }
+        except ValueError:
+            return None
+    
+    # Weekly: ROLLUP_WEEKLY_YYYYMMDD__sum.json (Monday date)
+    weekly_match = re.match(r'ROLLUP_WEEKLY_(\d{8})__sum\.json', fname)
+    if weekly_match:
+        monday_yyyymmdd = weekly_match.group(1)
+        try:
+            monday_date = datetime.datetime.strptime(monday_yyyymmdd, "%Y%m%d").date()
+            friday_date = monday_date + datetime.timedelta(days=4)
+            iso_year, iso_week, _ = monday_date.isocalendar()
+            return {
+                "kind": "rollup_weekly",
+                "start_date": monday_date,
+                "end_date": friday_date,
+                "date": monday_date,  # For compatibility
+                "date_yyyymmdd": monday_yyyymmdd,
+                "iso_year": iso_year,
+                "iso_week": iso_week,
+            }
+        except ValueError:
+            return None
+    
+    return None
+
+def load_rollup_json(rollup_path: Path) -> Optional[dict]:
+    """Load rollup JSON file and verify schema_version."""
+    # Diagnostic: Check if file exists
+    if not rollup_path.exists():
+        print(f"[ROLLUP DEBUG] File does not exist: {rollup_path}")
+        return None
+    
+    # Diagnostic: Check file size
+    try:
+        file_size = rollup_path.stat().st_size
+        if file_size == 0:
+            print(f"[ROLLUP DEBUG] File is empty (0 bytes): {rollup_path}")
+            return None
+        print(f"[ROLLUP DEBUG] Loading: {rollup_path.name} ({file_size} bytes)")
+    except Exception as e:
+        print(f"[ROLLUP DEBUG] Cannot stat file {rollup_path}: {e}")
+        return None
+    
+    try:
+        with open(rollup_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+            # Diagnostic: Check top-level structure
+            if not isinstance(data, dict):
+                print(f"[ROLLUP DEBUG] File {rollup_path.name} does not contain a JSON object (found: {type(data).__name__})")
+                return None
+            
+            # Verify it's actually a rollup by checking schema_version
+            schema = data.get("schema_version", "")
+            if schema == "twifo.rollup.v1":
+                print(f"[ROLLUP DEBUG] ✓ Successfully loaded {rollup_path.name} (schema: {schema})")
+                return data
+            else:
+                print(f"[ROLLUP DEBUG] ✗ Schema mismatch in {rollup_path.name}")
+                print(f"  Expected: 'twifo.rollup.v1'")
+                print(f"  Found: '{schema}' (type: {type(schema).__name__})")
+                print(f"  Top-level keys: {list(data.keys())[:10]}")
+                return None
+                
+    except json.JSONDecodeError as e:
+        print(f"[ROLLUP DEBUG] ✗ JSON parse error in {rollup_path.name}")
+        print(f"  Error: {e}")
+        print(f"  Line {e.lineno}, Column {e.colno}: {e.msg}")
+        return None
+    except UnicodeDecodeError as e:
+        print(f"[ROLLUP DEBUG] ✗ Encoding error in {rollup_path.name}")
+        print(f"  Error: {e}")
+        return None
+    except Exception as e:
+        print(f"[ROLLUP DEBUG] ✗ Unexpected error loading {rollup_path.name}")
+        print(f"  Error type: {type(e).__name__}")
+        print(f"  Error message: {e}")
+        import traceback
+        print(f"  Traceback: {traceback.format_exc()}")
+        return None
+
+def scan_rollups() -> List[dict]:
+    """
+    Scan rollups directories and return list of rollup file info.
+    Returns list of dicts with path, fname, metadata, etc.
+    """
+    rollups = []
+    rollups_dir = os.path.join(FILES_DIR, "rollups")
+    
+    print(f"[ROLLUP SCAN] Starting scan...")
+    print(f"[ROLLUP SCAN] FILES_DIR: {FILES_DIR}")
+    print(f"[ROLLUP SCAN] Rollups base dir: {rollups_dir}")
+    print(f"[ROLLUP SCAN] Rollups dir exists: {os.path.exists(rollups_dir)}")
+    print(f"[ROLLUP SCAN] Rollups dir is directory: {os.path.isdir(rollups_dir) if os.path.exists(rollups_dir) else 'N/A'}")
+    
+    # Scan daily rollups
+    daily_dir = os.path.join(rollups_dir, "daily")
+    print(f"[ROLLUP SCAN] Daily dir: {daily_dir}")
+    print(f"[ROLLUP SCAN] Daily dir exists: {os.path.exists(daily_dir)}")
+    print(f"[ROLLUP SCAN] Daily dir is directory: {os.path.isdir(daily_dir) if os.path.exists(daily_dir) else 'N/A'}")
+    
+    if os.path.isdir(daily_dir):
+        try:
+            all_files = os.listdir(daily_dir)
+            json_files = [f for f in all_files if f.endswith(".json")]
+            rollup_files = [f for f in json_files if f.startswith("ROLLUP_DAILY")]
+            
+            print(f"[ROLLUP SCAN] Daily dir contents: {len(all_files)} total files")
+            print(f"[ROLLUP SCAN] Daily JSON files: {len(json_files)}")
+            print(f"[ROLLUP SCAN] Daily ROLLUP_DAILY files: {len(rollup_files)}")
+            
+            if json_files and not rollup_files:
+                print(f"[ROLLUP SCAN] WARNING: Found JSON files but none start with 'ROLLUP_DAILY'")
+                print(f"[ROLLUP SCAN] Sample JSON files: {json_files[:5]}")
+            
+            for fname in rollup_files:
+                file_path = os.path.join(daily_dir, fname)
+                print(f"[ROLLUP SCAN] Processing: {fname}")
+                
+                metadata = parse_rollup_filename(fname)
+                if metadata:
+                    print(f"  ✓ Parsed successfully: date={metadata.get('date')}")
+                    rollups.append({
+                        "path": file_path,
+                        "fname": fname,
+                        "kind": "rollup_daily",
+                        "date": metadata["date"],
+                        "date_yyyymmdd": metadata["date_yyyymmdd"],
+                    })
+                else:
+                    print(f"  ✗ Failed to parse filename (does not match expected pattern)")
+                    print(f"    Expected: ROLLUP_DAILY_YYYYMMDD__sum.json")
+        except Exception as e:
+            print(f"[ROLLUP SCAN] ERROR scanning daily dir: {e}")
+            import traceback
+            print(traceback.format_exc())
+    else:
+        if not os.path.exists(daily_dir):
+            print(f"[ROLLUP SCAN] Daily directory does not exist: {daily_dir}")
+        else:
+            print(f"[ROLLUP SCAN] Daily path exists but is not a directory: {daily_dir}")
+    
+    # Scan weekly rollups
+    weekly_dir = os.path.join(rollups_dir, "weekly")
+    print(f"[ROLLUP SCAN] Weekly dir: {weekly_dir}")
+    print(f"[ROLLUP SCAN] Weekly dir exists: {os.path.exists(weekly_dir)}")
+    print(f"[ROLLUP SCAN] Weekly dir is directory: {os.path.isdir(weekly_dir) if os.path.exists(weekly_dir) else 'N/A'}")
+    
+    if os.path.isdir(weekly_dir):
+        try:
+            all_files = os.listdir(weekly_dir)
+            json_files = [f for f in all_files if f.endswith(".json")]
+            rollup_files = [f for f in json_files if f.startswith("ROLLUP_WEEKLY")]
+            
+            print(f"[ROLLUP SCAN] Weekly dir contents: {len(all_files)} total files")
+            print(f"[ROLLUP SCAN] Weekly JSON files: {len(json_files)}")
+            print(f"[ROLLUP SCAN] Weekly ROLLUP_WEEKLY files: {len(rollup_files)}")
+            
+            for fname in rollup_files:
+                file_path = os.path.join(weekly_dir, fname)
+                print(f"[ROLLUP SCAN] Processing: {fname}")
+                
+                metadata = parse_rollup_filename(fname)
+                if metadata:
+                    print(f"  ✓ Parsed successfully: {metadata.get('start_date')} to {metadata.get('end_date')}")
+                    rollups.append({
+                        "path": file_path,
+                        "fname": fname,
+                        "kind": "rollup_weekly",
+                        "start_date": metadata["start_date"],
+                        "end_date": metadata["end_date"],
+                        "date": metadata.get("date", metadata["start_date"]),
+                        "date_yyyymmdd": metadata["date_yyyymmdd"],
+                        "iso_year": metadata["iso_year"],
+                        "iso_week": metadata["iso_week"],
+                    })
+                else:
+                    print(f"  ✗ Failed to parse filename (does not match expected pattern)")
+                    print(f"    Expected: ROLLUP_WEEKLY_YYYYMMDD__sum.json")
+        except Exception as e:
+            print(f"[ROLLUP SCAN] ERROR scanning weekly dir: {e}")
+            import traceback
+            print(traceback.format_exc())
+    else:
+        if not os.path.exists(weekly_dir):
+            print(f"[ROLLUP SCAN] Weekly directory does not exist: {weekly_dir}")
+        else:
+            print(f"[ROLLUP SCAN] Weekly path exists but is not a directory: {weekly_dir}")
+    
+    print(f"[ROLLUP SCAN] Scan complete: Found {len(rollups)} rollup files")
+    return rollups
 
 def format_product_categories(categories: dict) -> str:
     """
@@ -432,6 +729,136 @@ def format_product_categories(categories: dict) -> str:
             parts.append(f"{cat_code} ({tickers})")
     
     return ", ".join(parts) if parts else "—"
+
+
+def clean_title(title_str: str, provider: str) -> str:
+    """
+    Clean title by removing everything before the first ' - ' and removing provider prefix and date codes.
+    Also strips HTML tags and special formatting characters.
+    
+    Examples:
+    "MUFG Asia FX Weekly - Local factors drive FX dispersion" -> "Local Factors Drive FX Dispersion"
+    "BOA US Economic Weekly IEEPA D-Day FAQs" -> "US Economic Weekly IEEPA D-Day FAQs"
+    """
+    # Strip HTML tags and entities first
+    import html
+    title = html.unescape(title_str)  # Convert HTML entities to text
+    title = re.sub(r'<[^>]+>', '', title)  # Remove HTML tags
+    title = re.sub(r'&[a-zA-Z]+;', '', title)  # Remove any remaining HTML entities
+    
+    # Remove everything before the first ' - '
+    if ' - ' in title:
+        title = title.split(' - ', 1)[1]  # Take everything after the first ' - '
+    
+    # Remove provider prefix (with various separators)
+    provider_upper = provider.upper()
+    provider_lower = provider.lower()
+    
+    # Try to remove provider prefix at start
+    patterns = [
+        f"^{re.escape(provider_upper)}\\s+",
+        f"^{re.escape(provider_lower)}\\s+",
+        f"^{re.escape(provider)}\\s+",
+        f"^{re.escape(provider_upper)}-\\s*",
+        f"^{re.escape(provider_upper)}_",
+    ]
+    
+    for pattern in patterns:
+        title = re.sub(pattern, "", title, flags=re.IGNORECASE)
+    
+    # Remove date patterns (YYYYMMDD, YYYY-MM-DD, etc.)
+    title = re.sub(r'\b\d{8}\b', '', title)  # YYYYMMDD
+    title = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', '', title)  # YYYY-MM-DD
+    
+    # Remove frequency codes at end (w, m, q, y, u, d, etc.)
+    title = re.sub(r'\s+[wmyqud]\s*$', '', title, flags=re.IGNORECASE)
+    
+    # Remove common suffixes/prefixes that indicate file metadata
+    title = re.sub(r'^Weekly\s+', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'^Monthly\s+', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'\s+Weekly\s*$', '', title, flags=re.IGNORECASE)
+    
+    # Clean up extra spaces and title case
+    title = re.sub(r'\s+', ' ', title).strip()
+    
+    # Title case (capitalize first letter of each word)
+    # But preserve common acronyms (FX, IEEPA, D-Day, etc.)
+    words = title.split()
+    title_words = []
+    for word in words:
+        if word.upper() in ['FX', 'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'KRW', 'INR', 'IDR', 'PHP', 'MYR', 'THB', 'SGD']:
+            title_words.append(word.upper())
+        elif '-' in word:
+            # Handle hyphenated words (D-Day, etc.)
+            parts = word.split('-')
+            title_words.append('-'.join(p.capitalize() for p in parts))
+        else:
+            title_words.append(word.capitalize())
+    
+    return ' '.join(title_words)
+
+
+def create_metadata_pills_html(provider: str, date_str: str, timeframe: str) -> str:
+    """
+    Create HTML for metadata pills: [Provider] [Date] [Timeframe]
+    Uses simpler HTML structure compatible with Dash DataTable markdown renderer.
+    
+    Args:
+        provider: Provider name (e.g., "MUFG")
+        date_str: Date string in YYYY-MM-DD format
+        timeframe: Timeframe (e.g., "1-3D", "1-2W")
+    
+    Returns:
+        HTML string with styled pills
+    
+    STYLING CUSTOMIZATION:
+    To tweak pill colors and font sizes, modify the inline styles below:
+    - Provider pill: background-color (#E9ECEF), color (#495057), font-size (11px)
+    - Date pill: background-color (#F8F9FA), color (#6C757D), font-size (11px)
+    - Timeframe pill: background-color (#007BFF), color (#FFFFFF), font-size (13px), font-weight (600)
+    """
+    # Format date for display (Jan 09, 2026)
+    try:
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        date_display = dt.strftime("%b %d, %Y")
+    except:
+        date_display = date_str
+    
+    # Escape HTML entities to prevent issues
+    provider_escaped = provider.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    date_escaped = date_display.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    timeframe_escaped = timeframe.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    # Provider pill (neutral gray) - using simpler inline style
+    provider_html = f'<span style="display:inline-block;background:#E9ECEF;color:#495057;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:500;margin-right:6px">{provider_escaped}</span>'
+    
+    # Date pill (lighter gray / secondary)
+    date_html = f'<span style="display:inline-block;background:#F8F9FA;color:#6C757D;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:400;margin-right:6px">{date_escaped}</span>'
+    
+    # Timeframe pill (primary color, larger, higher contrast)
+    timeframe_html = f'<span style="display:inline-block;background:#007BFF;color:#FFFFFF;padding:4px 12px;border-radius:12px;font-size:13px;font-weight:600">{timeframe_escaped}</span>'
+    
+    return f'{provider_html}{date_html}{timeframe_html}'
+
+
+def format_title_with_metadata(clean_title: str, provider: str, date_str: str, timeframe: str) -> str:
+    """
+    Format title column with cleaned title on first line and simple text metadata on second line.
+    Dash DataTable markdown has limitations with complex HTML, so we use simple text format.
+    
+    Returns: Title with metadata as simple text
+    """
+    # Format date for display (Jan 09, 2026)
+    try:
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        date_display = dt.strftime("%b %d, %Y")
+    except:
+        date_display = date_str
+    
+    # Use simple text format - DataTable markdown supports basic line breaks
+    # Format: Title on first line, metadata on second line as plain text
+    return f"{clean_title}<br/>{provider} • {date_display} • {timeframe}"
+
 
 ############################
 # 3) INITIALIZE APP
@@ -516,58 +943,7 @@ files_layout = html.Div(
             ],
         ),
 
-        # ── Row 2: Product Filter (3 cols) ──
-        html.Div(
-            style={
-                "display": "flex",
-                "justifyContent": "center",
-                "alignItems": "flex-start",
-                "gap": "20px",
-                "marginBottom": "20px",
-            },
-            children=[
-                html.Div(
-                    dcc.Checklist(
-                        id="product-dropdown",
-                        options=PRODUCT_OPTIONS,
-                        value=[opt["value"] for opt in PRODUCT_OPTIONS],  # all selected by default
-                        inputStyle={"marginRight": "6px"},
-                        labelStyle={"display": "block"},
-                    ),
-                    style={
-                        "columnCount": 3,
-                        "columnGap": "1em",
-                        "border": "1px solid #ccc",
-                        "borderRadius": "4px",
-                        "padding": "10px",
-                        "maxHeight": "200px",
-                        "overflowY": "auto",
-                        "width": "70%",
-                        "margin": "0 auto",
-                    },
-                ),
-                html.Div(
-                    [
-                        html.Button(
-                            "Select All", id="select-all-products", n_clicks=0,
-                            className="btn btn-sm btn-outline-primary"
-                        ),
-                        html.Button(
-                            "Clear All",  id="clear-all-products",  n_clicks=0,
-                            className="btn btn-sm btn-outline-secondary"
-                        ),
-                    ],
-                    style={
-                        "display": "flex",
-                        "flexDirection": "column",
-                        "gap": "8px",
-                        "justifyContent": "center",
-                    },
-                ),
-            ],
-        ),
-
-        # ── Row 3: Search Bars + Date Range + Counter (horizontal layout) ──
+        # ── Row 2: Search Bars + Date Range + Counter (horizontal layout) ──
         html.Div(
             style={
                 "display": "flex",
@@ -623,6 +999,20 @@ files_layout = html.Div(
                     className="btn btn-sm btn-outline-secondary",
                 ),
                 
+                # View Latest buttons
+                html.Button(
+                    "View Latest Daily Recap",
+                    id="btn_view_latest_daily",
+                    className="btn btn-sm btn-outline-primary",
+                    style={"whiteSpace": "nowrap"}
+                ),
+                # html.Button(
+                #     "View Latest Weekly Recap",
+                #     id="btn_view_latest_weekly",
+                #     className="btn btn-sm btn-outline-primary",
+                #     style={"whiteSpace": "nowrap"}
+                # ),
+                
                 # Article counter
                 html.Div(
                     id='article-counter',
@@ -636,6 +1026,32 @@ files_layout = html.Div(
                 ),
             ],
         ),
+
+        # Summary Type Filter Row - Commented out for now
+        # html.Div(
+        #     style={
+        #         "display": "flex",
+        #         "justifyContent": "center",
+        #         "alignItems": "center",
+        #         "gap": "10px",
+        #         "marginBottom": "15px",
+        #     },
+        #     children=[
+        #         html.Label("Summary Type:", style={"fontWeight": "500", "marginRight": "5px"}),
+        #         dcc.RadioItems(
+        #             id="summary_type_filter",
+        #             options=[
+        #                 {"label": "All", "value": "all"},
+        #                 {"label": "Daily Summary", "value": "daily"},
+        #                 {"label": "Weekly Summary", "value": "weekly"},
+        #             ],
+        #             value="all",
+        #             inline=True,
+        #             inputStyle={"marginRight": "5px", "marginLeft": "10px"},
+        #             labelStyle={"marginRight": "15px"},
+        #         ),
+        #     ],
+        # ),
 
         # Row 4: Progress bar section
         html.Div(
@@ -706,53 +1122,58 @@ files_layout = html.Div(
                         {"if": {"row_index": "odd"},  "backgroundColor": ROW_ODD_COLOR},
                         {"if": {"row_index": "even"}, "backgroundColor": ROW_EVEN_COLOR},
 
-                        # 2) Summary/Score column color coding based on score (0-10 scale)
+                        # 2) Score column color coding based on score (0-10 scale)
+                        # Using text type, so we check for specific string values
+                        # Note: Filter queries use exact string matches (no OR support, so we'll use individual rules)
                         # 0-2: Dark red
+                        # Removed "summary" column coloring - only Score column has colors now
                         {
-                            "if": {"filter_query": "{summary_score} <= 2 && {summary_score} >= 0", "column_id": "summary"},
-                            "backgroundColor": "#8B0000",  # Dark red
+                            "if": {"filter_query": '{summary_score} = "0"', "column_id": "summary_score"},
+                            "backgroundColor": "#8B0000", "color": "white"
                         },
                         {
-                            "if": {"filter_query": "{summary_score} <= 2 && {summary_score} >= 0", "column_id": "summary_score"},
-                            "backgroundColor": "#8B0000",
-                            "color": "white"
+                            "if": {"filter_query": '{summary_score} = "1"', "column_id": "summary_score"},
+                            "backgroundColor": "#8B0000", "color": "white"
+                        },
+                        {
+                            "if": {"filter_query": '{summary_score} = "2"', "column_id": "summary_score"},
+                            "backgroundColor": "#8B0000", "color": "white"
                         },
                         # 3-4: Red-orange
                         {
-                            "if": {"filter_query": "{summary_score} > 2 && {summary_score} <= 4", "column_id": "summary"},
-                            "backgroundColor": "#FF4500",  # Orange-red
+                            "if": {"filter_query": '{summary_score} = "3"', "column_id": "summary_score"},
+                            "backgroundColor": "#FF4500",
                         },
                         {
-                            "if": {"filter_query": "{summary_score} > 2 && {summary_score} <= 4", "column_id": "summary_score"},
+                            "if": {"filter_query": '{summary_score} = "4"', "column_id": "summary_score"},
                             "backgroundColor": "#FF4500",
                         },
                         # 5: Yellow
                         {
-                            "if": {"filter_query": "{summary_score} = 5", "column_id": "summary"},
-                            "backgroundColor": "#FFD700",  # Gold/Yellow
-                        },
-                        {
-                            "if": {"filter_query": "{summary_score} = 5", "column_id": "summary_score"},
+                            "if": {"filter_query": '{summary_score} = "5"', "column_id": "summary_score"},
                             "backgroundColor": "#FFD700",
                         },
                         # 6-7: Yellow-green
                         {
-                            "if": {"filter_query": "{summary_score} > 5 && {summary_score} <= 7", "column_id": "summary"},
-                            "backgroundColor": "#9ACD32",  # Yellow-green
+                            "if": {"filter_query": '{summary_score} = "6"', "column_id": "summary_score"},
+                            "backgroundColor": "#9ACD32",
                         },
                         {
-                            "if": {"filter_query": "{summary_score} > 5 && {summary_score} <= 7", "column_id": "summary_score"},
+                            "if": {"filter_query": '{summary_score} = "7"', "column_id": "summary_score"},
                             "backgroundColor": "#9ACD32",
                         },
                         # 8-10: Green
                         {
-                            "if": {"filter_query": "{summary_score} > 7 && {summary_score} <= 10", "column_id": "summary"},
-                            "backgroundColor": "#228B22",  # Forest green
+                            "if": {"filter_query": '{summary_score} = "8"', "column_id": "summary_score"},
+                            "backgroundColor": "#228B22", "color": "white"
                         },
                         {
-                            "if": {"filter_query": "{summary_score} > 7 && {summary_score} <= 10", "column_id": "summary_score"},
-                            "backgroundColor": "#228B22",
-                            "color": "white"
+                            "if": {"filter_query": '{summary_score} = "9"', "column_id": "summary_score"},
+                            "backgroundColor": "#228B22", "color": "white"
+                        },
+                        {
+                            "if": {"filter_query": '{summary_score} = "10"', "column_id": "summary_score"},
+                            "backgroundColor": "#228B22", "color": "white"
                         },
 
                         # 3) then your today‐rule *last* (overrides summary colors)
@@ -771,6 +1192,10 @@ files_layout = html.Div(
                         "overflow": "hidden",
                         "textOverflow": "ellipsis",
                     },
+                    style_cell_conditional=[
+                        {"if": {"column_id": "view"}, "width": "80px", "maxWidth": "80px"},
+                        {"if": {"column_id": "product_categories"}, "width": "80px", "maxWidth": "80px"},
+                    ],
                     style_header={
                         "backgroundColor": HEADER_BG_COLOR,
                         "color": HEADER_TEXT_COLOR,
@@ -792,6 +1217,9 @@ app.layout = html.Div([
     dcc.Store(id='login-status', storage_type='session', data=False),
         # store to track which user is logged in
     dcc.Store(id='login-user',   storage_type='session', data=""),
+    
+    # Location for navigation
+    dcc.Location(id='url', refresh=True),
 
     
 
@@ -911,6 +1339,9 @@ app.layout = html.Div([
                     )
                 ]
             ),
+            # Hidden store and div for navigation
+            dcc.Store(id="nav-url-store", data=""),
+            html.Div(id="dummy-nav-output", style={"display": "none"}),
 
             # file-browser UI!
             files_layout
@@ -934,25 +1365,6 @@ def select_clear_all(n_select, n_clear, options):
     elif triggered == "clear-all":
         return []
     return dash.no_update
-
-
-# ── 4c) "Select All / Clear All" for the product dropdown ──
-@app.callback(
-    Output("product-dropdown", "value"),
-    Input("select-all-products", "n_clicks"),
-    Input("clear-all-products",  "n_clicks"),
-    State("product-dropdown", "options"),
-    prevent_initial_call=True,
-)
-def select_clear_all_products(n_select, n_clear, options):
-    triggered = ctx.triggered_id
-    all_vals = [opt["value"] for opt in options]
-    if triggered == "select-all-products":
-        return all_vals
-    elif triggered == "clear-all-products":
-        return []
-    return dash.no_update
-
 
 
 ############################
@@ -988,6 +1400,69 @@ def clear_date_range(n_clicks):
     return None, None
 
 @app.callback(
+    Output("nav-url-store", "data"),
+    [Input("btn_view_latest_daily", "n_clicks")
+     # Input("btn_view_latest_weekly", "n_clicks")  # Commented out for now
+     ],
+    [State("login-user", "data")],
+    prevent_initial_call=True
+)
+def navigate_to_latest_rollup(n_daily, login_user):
+    """Find latest rollup URL and store it for clientside navigation."""
+    if not login_user:
+        raise PreventUpdate
+    
+    triggered = ctx.triggered_id
+    if triggered is None:
+        raise PreventUpdate
+    
+    # Scan for rollups
+    rollups_list = scan_rollups()
+    
+    if triggered == "btn_view_latest_daily":
+        # Find latest daily rollup
+        daily_rollups = [r for r in rollups_list if r["kind"] == "rollup_daily"]
+        if not daily_rollups:
+            raise PreventUpdate
+        
+        # Sort by date descending (most recent first)
+        daily_rollups.sort(key=lambda x: x["date"], reverse=True)
+        latest = daily_rollups[0]
+        filename = latest["fname"].replace('__sum.json', '__sum.pdf')  # Open PDF instead of JSON
+        url = f"/view?file=rollups/daily/{urllib.parse.quote(filename)}"
+        return url
+    
+    # elif triggered == "btn_view_latest_weekly":
+    #     # Find latest weekly rollup
+    #     weekly_rollups = [r for r in rollups_list if r["kind"] == "rollup_weekly"]
+    #     if not weekly_rollups:
+    #         raise PreventUpdate
+    #     
+    #     # Sort by start_date descending
+    #     weekly_rollups.sort(key=lambda x: x["start_date"], reverse=True)
+    #     latest = weekly_rollups[0]
+    #     filename = latest["fname"]
+    #     url = f"/view?file=rollups/weekly/{urllib.parse.quote(filename)}"
+    #     return url
+    
+    raise PreventUpdate
+
+# Clientside callback to handle navigation when store updates
+app.clientside_callback(
+    """
+    function(url) {
+        if (url && url !== '') {
+            window.location.href = url;
+        }
+        return '';
+    }
+    """,
+    Output("dummy-nav-output", "children"),
+    Input("nav-url-store", "data"),
+    prevent_initial_call=True
+)
+
+@app.callback(
     [
         Output("files-table", "columns"),
         Output("files-table", "data"),
@@ -998,9 +1473,6 @@ def clear_date_range(n_clicks):
         Output("progress-bar", "children"),
     ],
     [
-        Input("product-dropdown",     "value"),
-        Input("select-all-products",  "n_clicks"),
-        Input("clear-all-products",   "n_clicks"),
         Input("box-dropdown",         "value"),
         Input("select-all",           "n_clicks"),
         Input("clear-all",            "n_clicks"),
@@ -1011,10 +1483,10 @@ def clear_date_range(n_clicks):
         Input("date-range-picker",    "start_date"),
         Input("date-range-picker",    "end_date"),
         Input("clear-dates-btn",      "n_clicks"),
+        # Input("summary_type_filter",  "value"),  # Commented out for now
         Input("login-user",           "data"),
     ],
     [
-        State("product-dropdown",     "options"),
         State("box-dropdown",         "options"),
         State("title-search-input",   "value"),
         State("content-search-input", "value"),
@@ -1022,13 +1494,13 @@ def clear_date_range(n_clicks):
     prevent_initial_call=False,
 )
 def update_file_table(
-    sel_products, n_select_prod, n_clear_prod,
     sel, n_select, n_clear,
     _tbtn, _tenter,
     _cbtn, _center,
     start_date, end_date, _clear_dates,
+    # summary_type_filter,  # Commented out for now
     login_user,
-    product_options, options, title_value, content_value
+    options, title_value, content_value
 ):
     # Return empty data if not logged in (main-section is hidden anyway)
     if not login_user:
@@ -1048,48 +1520,104 @@ def update_file_table(
     # path to "Small Caps" folder
     SC = r"C:\Users\H&CDanHughes\Documents\SC_files"
 
-    # 1) Handle Select/Clear All for both products and categories
+    # 1) Handle Select/Clear All for categories
     triggered = ctx.triggered_id
-    if triggered == "select-all-products":
-        sel_products = [opt["value"] for opt in product_options]
-    elif triggered == "clear-all-products":
-        sel_products = []
-    elif triggered == "select-all":
+    if triggered == "select-all":
         sel = [opt["value"] for opt in options]
     elif triggered == "clear-all":
         sel = []
 
-    selected_products = set(sel_products or [])
     selected = set(sel or [])
     tt = (title_value or "").strip().lower()
     ct = (content_value or "").strip().lower()
-    
-    # Check if all products are selected (if so, skip product filtering)
-    # Handle case where product_options might not be initialized yet
-    if product_options:
-        total_products = len(product_options)
-        all_products_selected = len(selected_products) >= total_products
-    else:
-        # Fallback: if no options yet, assume all selected (show everything)
-        all_products_selected = True
 
     # 2) Build columns (dynamically - reordered: Firm, Frequency, Date, Title, Categories, View, Summary, Score, Charts)
     cols = [
         {"id": "firm",             "name": "Firm",       "type": "text"},
         {"id": "frequency",        "name": "Frequency",  "type": "text"},
         {"id": "date",             "name": "Date",       "type": "datetime"},
-        {"id": "title",            "name": "Title",      "type": "text"},
+        {"id": "title",            "name": "Title",      "type": "text"},  # Plain text only - no HTML, no metadata
         {"id": "product_categories", "name": "Categories", "type": "text"},
         {"id": "view",             "name": "View",       "presentation": "markdown"},
         {"id": "summary",          "name": "Summary",    "presentation": "markdown"},
-        {"id": "summary_score",    "name": "Score",      "type": "numeric"},
-        {"id": "chart_score",      "name": "Charts",     "type": "numeric"},
+        {"id": "summary_score",    "name": "Score",      "type": "text"},
+        {"id": "chart_score",      "name": "Charts",     "type": "text"},
     ]
     if login_user == "iwill":
         cols.insert(4, {"id": "subject",  "name": "Subject",  "type": "text"})
         cols.append({"id": "download","name": "Download","presentation": "markdown"})
 
-    # 3) Scan directories and collect candidate files
+    # 3) Scan rollups first (separate from regular articles)
+    rollup_files = []
+    rollups_list = scan_rollups()
+    print(f"[ROLLUP PROCESS] Processing {len(rollups_list)} rollup files from scan")
+    
+    for idx, rollup_info in enumerate(rollups_list, 1):
+        print(f"[ROLLUP PROCESS] [{idx}/{len(rollups_list)}] Processing: {rollup_info.get('fname', 'unknown')}")
+        # Parse date for filtering
+        if rollup_info["kind"] == "rollup_daily":
+            rollup_date = rollup_info["date"]
+            date_fmt = rollup_date.strftime("%Y-%m-%d")
+            is_today = (rollup_date == datetime.date.today())
+        else:  # weekly
+            rollup_date = rollup_info["end_date"]  # Use end date for sorting/filtering
+            date_fmt = f"{rollup_info['start_date'].strftime('%Y-%m-%d')} to {rollup_info['end_date'].strftime('%Y-%m-%d')}"
+            is_today = False
+        
+        # Apply date range filter
+        if start_date and rollup_date < datetime.datetime.fromisoformat(start_date).date():
+            print(f"  ✗ Filtered out by date range (before start_date: {start_date})")
+            continue
+        if end_date and rollup_date > datetime.datetime.fromisoformat(end_date).date():
+            print(f"  ✗ Filtered out by date range (after end_date: {end_date})")
+            continue
+        
+        # Load rollup JSON for UI data
+        rollup_json = load_rollup_json(Path(rollup_info["path"]))
+        if rollup_json is None:
+            print(f"  ✗ Failed to load JSON - skipping this rollup")
+            continue
+        
+        ui_data = rollup_json.get("ui", {})
+        if not ui_data:
+            print(f"  ⚠ WARNING: Rollup JSON loaded but 'ui' key is missing or empty")
+        else:
+            print(f"  ✓ Successfully loaded, UI title: {ui_data.get('title', 'N/A')}")
+        
+        summary_type = "daily" if rollup_info["kind"] == "rollup_daily" else "weekly"
+        # Build relative path for view links
+        subdir = "daily" if rollup_info["kind"] == "rollup_daily" else "weekly"
+        relative_path = f"rollups/{subdir}/{rollup_info['fname']}"
+        
+        rollup_files.append({
+            'path': rollup_info["path"],
+            'fname': rollup_info["fname"],
+            'relative_path': relative_path,  # For view links: rollups/daily/ or rollups/weekly/
+            'category': "Rollups",  # Special category
+            'title_str': ui_data.get("title", "Rollup"),
+            'date_fmt': date_fmt,
+            'is_today': is_today,
+            'frequency': 'D',  # 'D' for daily rollup
+            'timeframe': '',
+            'subj': "General",
+            'has_summary': True,
+            'summary_pdf_filename': rollup_info["fname"].replace(".json", ".pdf"),  # May not exist
+            'summary_json_filename': rollup_info["fname"],
+            'summary_filename': rollup_info["fname"],  # Link to JSON
+            'product_categories': {},
+            'summary_score': None,
+            'chart_score': None,
+            'extraction_status': "ok",
+            'extraction_quality': None,
+            'is_rollup': True,
+            'rollup_kind': rollup_info["kind"],
+            'rollup_meta': rollup_info,
+            'rollup_ui': ui_data,
+            'summary_type': summary_type,  # 'daily' or 'weekly'
+            'rollup_date': rollup_date  # Store date for sorting
+        })
+    
+    # 4) Scan directories and collect candidate files (regular articles)
     candidate_files = []
     scan = [(FILES_DIR, "General")]
     if login_user == "iwill":
@@ -1125,14 +1653,6 @@ def update_file_table(
                 title_str = "_".join(parts[1:])
                 date_part = ""
                 fcode = "u"
-
-            # apply product filter (only if NOT all products are selected)
-            # If all products selected, show everything (including files with no products)
-            if not all_products_selected:
-                file_products = detect_products(fname)
-                # File must contain at least one selected product, OR have no products (show all unlabeled)
-                if file_products and not any(prod in selected_products for prod in file_products):
-                    continue
 
             # extract date + flag if it's today
             try:
@@ -1171,14 +1691,19 @@ def update_file_table(
             # Prefer PDF summary, fallback to JSON (which can be converted to PDF)
             summary_filename = pdf_filename if pdf_filename else json_filename
             
-            # Load product categories and scores from summary JSON if available
+            # Load product categories, scores, timeframe, and extraction status from summary JSON if available
             product_categories = {}
             summary_score = None
             chart_score = None
+            timeframe = None
+            extraction_status = "unknown"
+            extraction_quality = None
             if json_filename:
                 json_path = os.path.join(dpath, json_filename)
                 product_categories = load_product_categories_from_summary(json_path)
                 summary_score, chart_score = load_summary_score(json_path)
+                timeframe = load_timeframe_from_summary(json_path)
+                extraction_status, extraction_quality = load_extraction_status(json_path)
             elif pdf_filename:
                 # If only PDF exists, try to load from corresponding JSON
                 json_path = os.path.join(dpath, json_filename)  # This will be empty, so skip
@@ -1188,10 +1713,12 @@ def update_file_table(
                 'path': full_path,
                 'fname': fname,
                 'category': category,
+                'summary_type': 'article',  # Tag as article
                 'title_str': title_str,
                 'date_fmt': date_fmt,
                 'is_today': is_today,
                 'frequency': frequency,
+                'timeframe': timeframe,                   # Timeframe from summary JSON (e.g., "1-3d")
                 'subj': subj,
                 'has_summary': has_sum,
                 'summary_pdf_filename': pdf_filename,      # PDF summary (preferred)
@@ -1199,10 +1726,15 @@ def update_file_table(
                 'summary_filename': summary_filename,      # Which one to link to (PDF preferred)
                 'product_categories': product_categories,
                 'summary_score': summary_score,           # Score for color coding (0-10)
-                'chart_score': chart_score                # Chart score (0-3)
+                'chart_score': chart_score,               # Chart score (0-3)
+                'extraction_status': extraction_status,    # Extraction status: "ok" | "failed" | "unknown"
+                'extraction_quality': extraction_quality   # Extraction quality (0-100) or None
             })
 
-    # Batch process PDF content search if needed
+    # Combine rollups and regular articles
+    all_candidates = rollup_files + candidate_files
+    
+    # Batch process PDF content search if needed (skip rollups, only search regular PDFs)
     if ct and candidate_files:
         # Show progress bar with file count
         total_files = len(candidate_files)
@@ -1211,7 +1743,7 @@ def update_file_table(
         progress_bar_style = {"width": "0%", "transition": "width 0.3s ease", "backgroundColor": "#007bff"}
         progress_bar_text = "Starting..."
         
-        # Process PDFs in batch
+        # Process PDFs in batch (only regular articles, not rollups)
         pdf_paths = [f['path'] for f in candidate_files]
         pdf_results = pdf_contains_batch(pdf_paths, ct)
         
@@ -1227,53 +1759,126 @@ def update_file_table(
         progress_bar_style = {"width": "0%", "transition": "width 0.3s ease"}
         progress_bar_text = "0%"
 
+    # Combine rollups and regular articles
+    all_candidates = rollup_files + candidate_files
+    
+    # Apply summary type filter - Commented out for now
+    # summary_type_filter = "all"  # Default to "all" when filter is disabled
+    # if summary_type_filter == "daily":
+    #     all_candidates = [f for f in all_candidates if f.get('summary_type') == 'daily']
+    # elif summary_type_filter == "weekly":
+    #     all_candidates = [f for f in all_candidates if f.get('summary_type') == 'weekly']
+    # "all" shows everything, no filtering needed
+    
     # Build rows from filtered candidates
     rows = []
-    for file_info in candidate_files:
-        # Skip if PDF content search failed
-        if ct and not pdf_results.get(file_info['path'], False):
-            continue
+    for file_info in all_candidates:
+        # Handle rollups differently
+        is_rollup = file_info.get('is_rollup', False)
         
-        # build the single row (with is_today flag)
-        safe = urllib.parse.quote(file_info['fname'])
-        view_md = f"[View](/view?file={safe})"
-        
-        # Summary link - link to PDF summary (__sum.pdf)
-        summary_score = file_info.get('summary_score')  # 0-10 or None
-        chart_score = file_info.get('chart_score')      # 0-3 or None
-        
-        if file_info['has_summary']:
-            # Prefer PDF summary
-            if file_info.get('summary_pdf_filename'):
-                safe_sum = urllib.parse.quote(file_info['summary_pdf_filename'])
-                summary_md = f"[📄 View](/view?file={safe_sum})"
-            elif file_info.get('summary_json_filename'):
-                # Only JSON exists - link to JSON (but this shouldn't happen with new autorun)
-                safe_sum = urllib.parse.quote(file_info['summary_json_filename'])
-                summary_md = f"[📋 JSON](/view?file={safe_sum})"
+        if is_rollup:
+            # Rollups: skip PDF content search, use simple title format
+            # Format: "Daily Recap YYYY-MM-DD"
+            date_display = file_info.get('date_fmt', '')
+            
+            # For daily rollups, format as "Daily Recap YYYY-MM-DD"
+            if file_info.get('summary_type') == 'daily':
+                title_with_pills = f"Daily Recap {date_display}"
+            else:
+                # For weekly rollups (if needed later)
+                title_with_pills = f"Weekly Recap {date_display}"
+            
+            # Link to rollup PDF - use relative_path if available, otherwise construct it
+            if 'relative_path' in file_info:
+                # Replace .json with .pdf for rollup files
+                pdf_path = file_info['relative_path'].replace('__sum.json', '__sum.pdf')
+                safe = urllib.parse.quote(pdf_path)
+            else:
+                # Fallback: construct path from summary_type
+                subdir = "daily" if file_info.get('summary_type') == 'daily' else "weekly"
+                pdf_fname = file_info['fname'].replace('__sum.json', '__sum.pdf')
+                safe = urllib.parse.quote(f"rollups/{subdir}/{pdf_fname}")
+            view_md = f"[View](/view?file={safe})"
+            summary_md = "--"
+            
+            row = {
+                "firm":              "Rollups",
+                "frequency":         file_info.get('frequency', 'D'),  # Use frequency from file_info (should be 'D' for daily)
+                "date":              file_info['date_fmt'],
+                "title":             title_with_pills,
+                "product_categories": "—",
+                "view":              view_md,
+                "summary":           summary_md,
+                "summary_score":     "N/A",
+                "chart_score":       "N/A",
+                "is_today":          file_info['is_today']
+            }
+        else:
+            # Regular articles: apply filters and formatting
+            # Skip if PDF content search failed
+            if ct and not pdf_results.get(file_info['path'], False):
+                continue
+            
+            # Filter out failed summaries from main feed (do not publish)
+            extraction_status = file_info.get('extraction_status', 'unknown')
+            if extraction_status == 'failed':
+                continue  # Skip failed summaries - do not publish to main feed
+            
+            # build the single row (with is_today flag)
+            safe = urllib.parse.quote(file_info['fname'])
+            view_md = f"[View](/view?file={safe})"
+            
+            # Summary link - link to PDF summary (__sum.pdf)
+            summary_score = file_info.get('summary_score')  # 0-10 or None
+            chart_score = file_info.get('chart_score')      # 0-3 or None
+            
+            if file_info['has_summary']:
+                # Prefer PDF summary
+                if file_info.get('summary_pdf_filename'):
+                    safe_sum = urllib.parse.quote(file_info['summary_pdf_filename'])
+                    summary_md = f"[📄 View](/view?file={safe_sum})"
+                elif file_info.get('summary_json_filename'):
+                    # Only JSON exists - link to JSON (but this shouldn't happen with new autorun)
+                    safe_sum = urllib.parse.quote(file_info['summary_json_filename'])
+                    summary_md = f"[📋 JSON](/view?file={safe_sum})"
+                else:
+                    summary_md = "—"
             else:
                 summary_md = "—"
-        else:
-            summary_md = "—"
-        
-        # Format product categories for display (compact ticker format)
-        product_categories_str = format_product_categories(file_info.get('product_categories', {}))
-        
-        row = {
-            "firm":              file_info['category'],
-            "frequency":         file_info['frequency'],
-            "date":              file_info['date_fmt'],
-            "title":             file_info['title_str'],
-            "product_categories": product_categories_str,
-            "view":              view_md,
-            "summary":           summary_md,
-            "summary_score":     summary_score if summary_score is not None else "",  # Empty if no summary
-            "chart_score":       chart_score if chart_score is not None else "",      # Empty if no summary
-            "is_today":          file_info['is_today']
-        }
+            
+            # Format product categories for display (compact ticker format)
+            product_categories_str = format_product_categories(file_info.get('product_categories', {}))
+            
+            # Format scores: "N/A" for missing, number string for valid scores
+            summary_score_str = "N/A" if summary_score is None else str(summary_score)
+            chart_score_str = "N/A" if chart_score is None else str(chart_score)
+            
+            # Clean title - use ONLY the clean title, no metadata, no HTML tags
+            provider = file_info['category']
+            clean_title_str = clean_title(file_info['title_str'], provider)
+            
+            # Use ONLY the clean title - no metadata, no <br/>, no dates, no provider, no frequency
+            title_with_pills = clean_title_str
+            
+            row = {
+                "firm":              file_info['category'],
+                "frequency":         file_info['frequency'],
+                "date":              file_info['date_fmt'],
+                "title":             title_with_pills,
+                "product_categories": product_categories_str,
+                "view":              view_md,
+                "summary":           summary_md,
+                "summary_score":     summary_score_str,  # "N/A" or number string
+                "chart_score":       chart_score_str,    # "N/A" or number string
+                "is_today":          file_info['is_today']
+            }
         if login_user == "iwill":
-            row["subject"]  = file_info['subj']
-            row["download"] = f"[Download](/download?file={safe})"
+            if not is_rollup:
+                row["subject"]  = file_info['subj']
+                row["download"] = f"[Download](/download?file={safe})"
+            else:
+                row["subject"] = "General"
+                row["download"] = "—"
 
         rows.append(row)
 
@@ -1285,7 +1890,11 @@ def update_file_table(
             return datetime.datetime.min  # "Unknown" dates go last
 
     rows.sort(key=sort_key, reverse=True)
-
+    
+    # Safety check: ensure rows is always a list (should never fail, but just in case)
+    if not isinstance(rows, list):
+        rows = []
+    
     # Calculate article counts for counter
     total_shown = len(rows)
     total_candidates = len(candidate_files)
@@ -1295,8 +1904,7 @@ def update_file_table(
     filters_active = (
         ct or tt or 
         (start_date or end_date) or 
-        (not all_categories_selected) or
-        (not all_products_selected)
+        (not all_categories_selected)
     )
     
     # Build counter text
@@ -1417,12 +2025,57 @@ def view_file():
     if not f:
         return "No file specified.", 400
 
+    # Handle rollups in subdirectories
+    if f.startswith("rollups/"):
+        rollup_path = os.path.join(FILES_DIR, f)
+        if os.path.isfile(rollup_path):
+            directory = os.path.dirname(rollup_path)
+            filename = os.path.basename(rollup_path)
+            return send_from_directory(directory, filename)
+        return "Rollup file not found.", 404
+
     # Check both directories
     dirs_to_check = [
         FILES_DIR,
         r"C:\Users\H&CDanHughes\Documents\SC_files"
     ]
 
+    # Special handling for __sum.pdf: generate on-demand if missing
+    if f.endswith("__sum.pdf"):
+        for directory in dirs_to_check:
+            full_path = os.path.join(directory, f)
+            
+            # If PDF exists, serve it
+            if os.path.isfile(full_path):
+                return send_from_directory(directory, f)
+            
+            # If PDF doesn't exist, try to generate from JSON
+            json_file = f.replace("__sum.pdf", "__sum.json")
+            json_path = os.path.join(directory, json_file)
+            
+            if os.path.isfile(json_path):
+                try:
+                    # Try to generate PDF on-demand
+                    from pathlib import Path
+                    from summarize_pdf import ensure_summary_pdf
+                    
+                    # Construct original PDF path
+                    original_pdf = f.replace("__sum.pdf", ".pdf")
+                    original_path = Path(os.path.join(directory, original_pdf))
+                    
+                    if ensure_summary_pdf(original_path):
+                        # PDF was generated, serve it
+                        return send_from_directory(directory, f)
+                    else:
+                        return f"Failed to generate PDF summary for {f}", 500
+                        
+                except Exception as e:
+                    print(f"[ERROR] On-demand PDF generation failed for {f}: {e}")
+                    return f"Error generating PDF summary: {str(e)}", 500
+        
+        return "File not found.", 404
+
+    # Normal file serving for all other files
     for directory in dirs_to_check:
         full_path = os.path.join(directory, f)
         if os.path.isfile(full_path):
