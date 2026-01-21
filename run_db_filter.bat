@@ -1,8 +1,12 @@
 @echo off
 setlocal ENABLEEXTENSIONS
 
-REM --- Use the venv python in this project (recommended) ---
-set "PYTHON_EXE=C:\Program Files\Coding Projects\TWIFO_Sharing\.venv13\Scripts\python.exe"
+REM --- Use system Python (venv at .venv13\Scripts\python.exe if it exists, else system) ---
+if exist "C:\Program Files\Coding Projects\TWIFO_Sharing\.venv13\Scripts\python.exe" (
+  set "PYTHON_EXE=C:\Program Files\Coding Projects\TWIFO_Sharing\.venv13\Scripts\python.exe"
+) else (
+  set "PYTHON_EXE=C:\Python313\python.exe"
+)
 
 REM --- Script path (your renamed script) ---
 set "SCRIPT=C:\Program Files\Coding Projects\TWIFO_Sharing\db_filter_autorun.py"

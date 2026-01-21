@@ -31,8 +31,9 @@ REM ─── Switch to TWIFO_Sharing folder ───────────�
 cd /d "%~dp0"
 
 REM ─── Launch via Streamlit using venv's python ─────────────────
-echo [INFO] Starting import_dropbox.py with Streamlit...
-"%STREAMLIT%" run import_dropbox.py
+REM Using FIXED port 8001 (no auto-increment)
+echo [INFO] Starting import_dropbox.py with Streamlit on port 8001...
+"%STREAMLIT%" run import_dropbox.py --server.port 8001
 if errorlevel 1 (
     echo [ERROR] Streamlit exited with an error.
     pause

@@ -746,6 +746,11 @@ def clean_title(title_str: str, provider: str) -> str:
     title = re.sub(r'<[^>]+>', '', title)  # Remove HTML tags
     title = re.sub(r'&[a-zA-Z]+;', '', title)  # Remove any remaining HTML entities
     
+    # Remove date and provider prefix pattern: -MM-DD-Provider-Title or -YYYY-MM-DD-Provider-Title
+    # Pattern: starts with -, then date (MM-DD or YYYY-MM-DD), then provider, then title
+    title = re.sub(r'^-\d{1,2}-\d{1,2}-', '', title)  # Remove -MM-DD- or -M-D- at start
+    title = re.sub(r'^-\d{4}-\d{2}-\d{2}-', '', title)  # Remove -YYYY-MM-DD- at start
+    
     # Remove everything before the first ' - '
     if ' - ' in title:
         title = title.split(' - ', 1)[1]  # Take everything after the first ' - '
@@ -760,6 +765,8 @@ def clean_title(title_str: str, provider: str) -> str:
         f"^{re.escape(provider_lower)}\\s+",
         f"^{re.escape(provider)}\\s+",
         f"^{re.escape(provider_upper)}-\\s*",
+        f"^{re.escape(provider_lower)}-\\s*",
+        f"^{re.escape(provider)}-\\s*",  # Handle "Deutsche Bank-" pattern
         f"^{re.escape(provider_upper)}_",
     ]
     

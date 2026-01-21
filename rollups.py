@@ -193,22 +193,83 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
         items = gather(section, limit=limit, filter_trade_ideas=(section == "what_occurred"))
         return _group_by_product(items)
 
-    # trade ideas - ONLY include if they have direction + trigger + timeframe
-    trades = []
+    # Aggregate trade ideas by product (new structure)
+    # Trade ideas now structured by product with: product, bias, catalyst, setup, key_levels, risk, time_horizon
+    trade_ideas_by_product = {}
     for a in article_sum_jsons:
-        for t in (a.get("sections", {}).get("trade_ideas", []) or []):
+        article_trades = a.get("sections", {}).get("trade_ideas", []) or []
+        provider = a.get("meta", {}).get("provider", "O")
+        for t in article_trades:
             if not isinstance(t, dict):
                 continue
-            # Hard gate: require direction + instrument + trigger + (timeframe_bucket or horizon)
-            if not t.get("direction") or not t.get("instrument") or not t.get("trigger"):
+            product = t.get("product", "")
+            if not product:
                 continue
-            if not (t.get("timeframe_bucket") or t.get("horizon")):
-                continue
-            trades.append(t)
+            
+            # Initialize product entry if needed
+            if product not in trade_ideas_by_product:
+                trade_ideas_by_product[product] = {
+                    "product": product,
+                    "bias": t.get("bias", "Neutral"),
+                    "catalyst": [],
+                    "setup": [],
+                    "key_levels": [],
+                    "risk": [],
+                    "time_horizon": [],
+                    "sources": []
+                }
+            
+            # Aggregate fields (collect unique values)
+            prod_entry = trade_ideas_by_product[product]
+            if t.get("catalyst") and t.get("catalyst") not in prod_entry["catalyst"]:
+                prod_entry["catalyst"].append(t.get("catalyst"))
+            if t.get("setup") and t.get("setup") not in prod_entry["setup"]:
+                prod_entry["setup"].append(t.get("setup"))
+            if t.get("key_levels") and t.get("key_levels") not in prod_entry["key_levels"]:
+                prod_entry["key_levels"].append(t.get("key_levels"))
+            if t.get("risk") and t.get("risk") not in prod_entry["risk"]:
+                prod_entry["risk"].append(t.get("risk"))
+            if t.get("time_horizon") and t.get("time_horizon") not in prod_entry["time_horizon"]:
+                prod_entry["time_horizon"].append(t.get("time_horizon"))
+            if provider not in prod_entry["sources"]:
+                prod_entry["sources"].append(provider)
+            
+            # Update bias if more specific (Bull/Bear > Neutral)
+            bias = t.get("bias", "Neutral")
+            if bias != "Neutral" and prod_entry["bias"] == "Neutral":
+                prod_entry["bias"] = bias
+    
+    # Convert to list format, prioritizing ES, NQ, GC, SI, VIX
+    priority_products = ["ES", "NQ", "GC", "SI", "VIX"]
+    other_products = [p for p in trade_ideas_by_product.keys() if p not in priority_products]
+    trade_ideas_list = []
+    for product in priority_products + sorted(other_products):
+        if product in trade_ideas_by_product:
+            entry = trade_ideas_by_product[product]
+            # Combine lists into strings
+            trade_ideas_list.append({
+                "product": product,
+                "bias": entry["bias"],
+                "catalyst": "; ".join(entry["catalyst"]) if entry["catalyst"] else "",
+                "setup": "; ".join(entry["setup"]) if entry["setup"] else "",
+                "key_levels": "; ".join(entry["key_levels"]) if entry["key_levels"] else "",
+                "risk": "; ".join(entry["risk"]) if entry["risk"] else "",
+                "time_horizon": "; ".join(entry["time_horizon"]) if entry["time_horizon"] else "",
+                "sources": sorted(entry["sources"])
+            })
 
-    trades = _dedupe_trade_ideas(trades)
-    trades = _rank_trade_ideas(trades)
-    trade_buckets = _bucket_trades(trades)
+    # Derive consensus catalysts (from common catalysts in trade ideas)
+    all_catalysts = []
+    for entry in trade_ideas_list:
+        catalyst = entry.get("catalyst", "")
+        if catalyst:
+            all_catalysts.append(catalyst)
+    # Simple approach: take most common catalysts (could be enhanced)
+    consensus_catalysts = [{"text": c, "sources": []} for c in all_catalysts[:3]]
+    
+    # Derive conflicts/uncertainties (from conflicting biases on same products)
+    conflicts = []
+    # For now, use empty list - can be enhanced later to detect conflicting biases
 
     # sources list
     sources = []
@@ -258,11 +319,18 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             ]
         },
         "sections": {
-            # SAME detail categories as single-article:
-            "tldr": gather("tldr", limit=8),
-            "observations": gather_grouped("what_occurred", limit=30),  # Grouped by product
-            "forward_watch": gather_grouped("forward_watch", limit=25),  # Grouped by product
-            "trade_ideas": trade_buckets,
+            # New trader-focused structure
+            "tldr": gather("tldr", limit=6),
+            "trade_ideas": trade_ideas_list,
+            "stocks": gather("stocks", limit=8),
+            "other_futures": gather("other_futures", limit=20),
+            "forex": gather("forex", limit=6),
+            "other": gather("other", limit=15),
+            "consensus_catalysts": consensus_catalysts[:3],
+            "conflicts_uncertainties": conflicts[:3],
+            # Keep legacy fields for backward compatibility but they won't be rendered
+            "observations": gather_grouped("what_occurred", limit=30),
+            "forward_watch": gather_grouped("forward_watch", limit=25),
             "warnings": gather("warnings", limit=15),
             "tips_reminders": gather("tips_reminders", limit=10),
             "cross_asset_impacts": gather("cross_asset_impacts", limit=15),
@@ -409,111 +477,128 @@ def build_weekly_rollup(start_date: dt.date, end_date: dt.date, article_sum_json
     return rollup
 
 def render_rollup_txt(r: dict) -> str:
+    """
+    Render rollup in new trader-focused format with word limits.
+    """
     meta = r.get("meta", {})
     ui = r.get("ui", {})
     title = ui.get("title", "")
-    providers = " | ".join(meta.get("providers", []))
-    products = " | ".join(meta.get("products", []))
-
-    def bullet_lines(items):
-        """Format items with products (and sources only if > 1 source)."""
-        out = []
-        for it in items or []:
-            if isinstance(it, dict):
-                text = it.get('text','').strip()
-                sources = it.get("sources", [])
-                item_products = it.get("products", [])
-                
-                # Build parentheses: products, and sources only if > 1
-                paren_parts = []
-                if item_products:
-                    paren_parts.append(', '.join(item_products))
-                if len(sources) > 1:  # Only show sources if multiple
-                    paren_parts.append(', '.join(sources))
-                
-                paren_str = f" ({', '.join(paren_parts)})" if paren_parts else ""
-                out.append(f"- {text}{paren_str}")
-        return "\n".join(out) if out else "- (none)"
-    
-    def grouped_bullet_lines(grouped_items):
-        """Format items grouped by product category."""
-        if not grouped_items or not isinstance(grouped_items, dict):
-            return "- (none)"
-        
-        out = []
-        # Sort products alphabetically, but put "Other" last
-        sorted_products = sorted([p for p in grouped_items.keys() if p != "Other"])
-        if "Other" in grouped_items:
-            sorted_products.append("Other")
-        
-        for product in sorted_products:
-            items = grouped_items.get(product, [])
-            if items and len(items) > 0:
-                out.append(f"{product}")  # Don't add leading newline - handled by join
-                for it in items:
-                    if isinstance(it, dict):
-                        text = it.get('text','').strip()
-                        if text:  # Only add if text is not empty
-                            sources = it.get("sources", [])
-                            
-                            # Only show sources if > 1 (no product parentheses - product is already the header)
-                            sources_str = f" ({', '.join(sources)})" if len(sources) > 1 else ""
-                            out.append(f"  - {text}{sources_str}")
-        
-        if not out:
-            return "- (none)"
-        
-        # Join with newlines - no leading newline since first item is product name
-        return "\n".join(out)
-
     secs = r.get("sections", {})
-    trades = secs.get("trade_ideas", {})
-    def trade_lines(lst):
+    
+    def bullet_lines(items, max_items=None):
+        """Format bullets from text items."""
         out = []
-        for t in lst or []:
-            timeframe = t.get('timeframe_bucket') or t.get('horizon', '')
-            out.append(
-                f"- {t.get('direction','').upper()} {t.get('instrument','')} | "
-                f"{t.get('trigger','')} | timeframe={timeframe} | "
-                f"conf={t.get('confidence_0_100','')} | sources={','.join(t.get('sources',[]))}"
-            )
-        return "\n".join(out) if out else "- (none)"
-
-    return f"""{title}
-Products: {products}
-Sources: {providers}
+        items_to_process = items[:max_items] if max_items and isinstance(items, list) else items
+        for it in items_to_process or []:
+            if isinstance(it, dict):
+                text = it.get('text', '').strip()
+                if text:
+                    out.append(f"• {text}")
+            elif isinstance(it, str):
+                text = it.strip()
+                if text:
+                    out.append(f"• {text}")
+        return "\n".join(out) if out else "• (none)"
+    
+    # TL;DR (max 6)
+    tldr_items = secs.get("tldr", [])[:6]
+    tldr_text = bullet_lines(tldr_items)
+    
+    # TRADE IDEAS - structured by product
+    trade_ideas = secs.get("trade_ideas", [])
+    trade_ideas_text = []
+    
+    priority_products = ["ES", "NQ", "GC", "SI", "VIX"]
+    trade_by_product = {item.get("product"): item for item in trade_ideas if isinstance(item, dict) and item.get("product")}
+    other_products = [p for p in trade_by_product.keys() if p not in priority_products]
+    ordered_products = [p for p in priority_products if p in trade_by_product] + sorted(other_products)
+    
+    for product in ordered_products:
+        item = trade_by_product[product]
+        bias = item.get("bias", "Neutral")
+        catalyst = item.get("catalyst", "")
+        setup = item.get("setup", "")
+        key_levels = item.get("key_levels", "")
+        risk = item.get("risk", "")
+        time_horizon = item.get("time_horizon", "")
+        
+        if bias == "Neutral" and not catalyst:
+            continue  # Skip products with no meaningful trade ideas
+        
+        trade_ideas_text.append(f"{product}")
+        trade_ideas_text.append(f"  Bias: {bias}")
+        if catalyst:
+            trade_ideas_text.append(f"  Catalyst: {catalyst}")
+        if setup:
+            trade_ideas_text.append(f"  Setup: {setup}")
+        if key_levels:
+            trade_ideas_text.append(f"  Key Levels: {key_levels}")
+        if risk:
+            trade_ideas_text.append(f"  Risk: {risk}")
+        if time_horizon:
+            trade_ideas_text.append(f"  Time Horizon: {time_horizon}")
+    
+    trade_ideas_output = "\n".join(trade_ideas_text) if trade_ideas_text else "• (none)"
+    
+    # STOCKS
+    stocks_items = secs.get("stocks", [])[:8]
+    stocks_text = bullet_lines(stocks_items)
+    
+    # OTHER FUTURES
+    other_futures_items = secs.get("other_futures", [])
+    other_futures_text = bullet_lines(other_futures_items)
+    
+    # FOREX
+    forex_items = secs.get("forex", [])[:6]
+    forex_text = bullet_lines(forex_items)
+    
+    # OTHER
+    other_items = secs.get("other", [])
+    other_text = bullet_lines(other_items)
+    
+    # CONSENSUS CATALYSTS (daily only)
+    consensus_catalysts_items = secs.get("consensus_catalysts", [])[:3]
+    consensus_catalysts_text = bullet_lines(consensus_catalysts_items)
+    
+    # CONFLICTS/UNCERTAINTIES (daily only)
+    conflicts_items = secs.get("conflicts_uncertainties", [])[:3]
+    conflicts_text = bullet_lines(conflicts_items)
+    
+    # Build output
+    output = f"""{title}
 
 TL;DR
-{bullet_lines(secs.get("tldr"))}
+{tldr_text}
 
-OBSERVATIONS
-{grouped_bullet_lines(secs.get("observations"))}
+TRADE IDEAS
+{trade_ideas_output}
 
-FORWARD WATCH
-{grouped_bullet_lines(secs.get("forward_watch"))}
+STOCKS
+{stocks_text}
 
-TRADE IDEAS — 1-3 DAYS
-{trade_lines(trades.get("d_1_3"))}
+OTHER FUTURES
+{other_futures_text}
 
-TRADE IDEAS — 1-2 WEEKS
-{trade_lines(trades.get("w_1_2"))}
+FOREX
+{forex_text}
 
-TRADE IDEAS — >2 WEEKS
-{trade_lines(trades.get("gt_2w"))}
+OTHER
+{other_text}
 
-TRADE IDEAS — WATCHLIST
-{trade_lines(trades.get("watchlist_only"))}
+CONSENSUS CATALYSTS TODAY
+{consensus_catalysts_text}
 
-WARNINGS
-{bullet_lines(secs.get("warnings"))}
-
-TIPS & REMINDERS
-{bullet_lines(secs.get("tips_reminders"))}
-
-CROSS-ASSET IMPACTS
-{bullet_lines(secs.get("cross_asset_impacts"))}
-
-SCENARIOS
-{bullet_lines(secs.get("scenarios"))}
+CONFLICTS/UNCERTAINTIES
+{conflicts_text}
 """
+    
+    # Enforce word limit (250-450 target, 600 hard max)
+    word_count = len(output.split())
+    if word_count > 600:
+        # Truncate sections starting from the least important
+        # This is a simple approach - could be more sophisticated
+        output = output[:output[:output.rfind('\n\nOTHER\n')].rfind('\n\n')]
+        output += "\n\n[Truncated to meet 600 word limit]"
+    
+    return output
 

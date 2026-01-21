@@ -105,112 +105,127 @@ def _failed_stub(pdf_path: Path, reason: str, extraction: dict, meta: dict) -> d
 
 def render_sum_txt(sum_json: dict) -> str:
     """
-    Render summary in Egypt-format (consistent single-article format).
+    Render summary in new trader-focused format (article template).
     """
-    from datetime import datetime
-    
     meta = sum_json.get("meta", {})
-    prov = meta.get("provider", "")
-    date_str = meta.get("published_date", "")
-    horizon = meta.get("horizon", "")
     title = meta.get("title", "")
-    theme = meta.get("theme", "")
-    products = meta.get("products", [])
-    model = meta.get("model", "gpt-4o-mini")
-    generated_at = meta.get("generated_at_iso", "")
+    s = sum_json.get("sections", {})
     
-    # Format date for display
-    try:
-        if len(date_str) == 8:
-            dt_obj = datetime.strptime(date_str, "%Y%m%d")
-            date_display = dt_obj.strftime("%b %d, %Y")
-        else:
-            date_display = date_str
-    except:
-        date_display = date_str
-    
-    # Format horizon for display
-    horizon_map = {
-        "d": "0–3D",
-        "w": "1–2W",
-        "m": ">2W",
-        "q": ">2W",
-        "y": ">2W",
-        "u": "1–2W"  # Unknown defaults to 1-2W
-    }
-    horizon_display = horizon_map.get(horizon.lower(), horizon)
-    
-    # Get score (default to 0 if missing)
-    score = 0
-    if "self_evaluation" in sum_json:
-        score = sum_json["self_evaluation"].get("summary_score_0_10", 0)
-    elif "scan" in sum_json:
-        score = sum_json["scan"].get("score", {}).get("summary_score_0_10", 0)
-    else:
-        score = sum_json.get("summary_score_0_10", 0)
-    
-    # Products line
-    products_line = ", ".join(products) if products else "(none)"
-    
-    def bullet_lines(items: list, prefix="• "):
-        """Format bullets without sources (cleaner)."""
+    def bullet_lines(items: list):
+        """Format bullets."""
         out = []
         for it in items:
             if isinstance(it, dict):
                 text = it.get('text', '').strip()
                 if text:
-                    out.append(f"{prefix}{text}")
+                    out.append(f"• {text}")
             else:
                 text = str(it).strip()
                 if text:
-                    out.append(f"{prefix}{text}")
-        return "\n".join(out) if out else f"{prefix}(none)"
+                    out.append(f"• {text}")
+        return "\n".join(out) if out else "• (none)"
     
-    s = sum_json.get("sections", {})
+    # TL;DR (max 3)
+    tldr_items = s.get("tldr", [])[:3]
+    tldr_text = bullet_lines(tldr_items)
     
-    # Format actionable (trade ideas)
-    actionable_items = s.get("trade_ideas", [])
-    actionable_lines = []
-    for item in actionable_items:
-        if isinstance(item, dict):
-            text = item.get("text", "")
-            if not text:
-                # Build from structured fields
-                direction = item.get("direction", "")
-                instrument = item.get("instrument", "")
-                trigger = item.get("trigger", "")
-                horizon_val = item.get("horizon", "")
-                text = f"{direction.capitalize()} {instrument} {trigger} ({horizon_val})"
-            actionable_lines.append(f"• {text}")
+    # TRADE IDEAS - structured by product (ALWAYS ES, NQ, GC, SI, VIX in that order)
+    trade_ideas = s.get("trade_ideas", [])
+    trade_ideas_text = []
+    
+    priority_products = ["ES", "NQ", "GC", "SI", "VIX"]
+    trade_by_product = {item.get("product"): item for item in trade_ideas if isinstance(item, dict) and item.get("product")}
+    other_products = sorted([p for p in trade_by_product.keys() if p not in priority_products])
+    
+    # Process priority products in exact order
+    for product in priority_products:
+        if product not in trade_by_product:
+            continue  # Skip if not present
+        
+        item = trade_by_product[product]
+        bias = item.get("bias", "Neutral")
+        catalyst = item.get("catalyst", "")
+        setup = item.get("setup", "")
+        key_levels = item.get("key_levels", "")
+        risk = item.get("risk", "")
+        time_horizon = item.get("time_horizon", "")
+        
+        if bias == "Neutral" and ("No direct trade idea" in catalyst or not catalyst.strip()):
+            trade_ideas_text.append(f"{product}: No direct trade idea from this article")
         else:
-            actionable_lines.append(f"• {str(item)}")
+            trade_ideas_text.append(f"{product}")
+            trade_ideas_text.append(f"  Bias: {bias}")
+            if catalyst:
+                trade_ideas_text.append(f"  Catalyst: {catalyst}")
+            if setup:
+                trade_ideas_text.append(f"  Setup: {setup}")
+            if key_levels:
+                trade_ideas_text.append(f"  Key Levels: {key_levels}")
+            if risk:
+                trade_ideas_text.append(f"  Risk: {risk}")
+            if time_horizon:
+                trade_ideas_text.append(f"  Time Horizon: {time_horizon}")
     
-    actionable_text = "\n".join(actionable_lines) if actionable_lines else "• (none)"
+    # Process other products
+    for product in other_products:
+        item = trade_by_product[product]
+        bias = item.get("bias", "Neutral")
+        catalyst = item.get("catalyst", "")
+        setup = item.get("setup", "")
+        key_levels = item.get("key_levels", "")
+        risk = item.get("risk", "")
+        time_horizon = item.get("time_horizon", "")
+        
+        trade_ideas_text.append(f"{product}")
+        trade_ideas_text.append(f"  Bias: {bias}")
+        if catalyst:
+            trade_ideas_text.append(f"  Catalyst: {catalyst}")
+        if setup:
+            trade_ideas_text.append(f"  Setup: {setup}")
+        if key_levels:
+            trade_ideas_text.append(f"  Key Levels: {key_levels}")
+        if risk:
+            trade_ideas_text.append(f"  Risk: {risk}")
+        if time_horizon:
+            trade_ideas_text.append(f"  Time Horizon: {time_horizon}")
     
-    # Format generated timestamp
-    gen_display = generated_at.split("T")[0] if "T" in generated_at else generated_at
+    trade_ideas_output = "\n".join(trade_ideas_text) if trade_ideas_text else "• (none)"
+    
+    # STOCKS
+    stocks_items = s.get("stocks", [])[:8]
+    stocks_text = bullet_lines(stocks_items)
+    
+    # OTHER FUTURES
+    other_futures_items = s.get("other_futures", [])
+    other_futures_text = bullet_lines(other_futures_items)
+    
+    # FOREX
+    forex_items = s.get("forex", [])[:6]
+    forex_text = bullet_lines(forex_items)
+    
+    # OTHER
+    other_items = s.get("other", [])
+    other_text = bullet_lines(other_items)
     
     return f"""{title}
-{prov}  {date_display}  {horizon_display}  {score}/10
-Theme: {theme}
-Products: {products_line}
 
-== TL;DR ==
-{bullet_lines(s.get("tldr", []))}
+TL;DR
+{tldr_text}
 
-== KEY DATA / CONTEXT ==
-{bullet_lines(s.get("what_occurred", []))}
+TRADE IDEAS
+{trade_ideas_output}
 
-== FORWARD WATCH / EXPECTATIONS ==
-{bullet_lines(s.get("forward_watch", []))}
+STOCKS
+{stocks_text}
 
-Generated: {gen_display}  Model: {model}
+OTHER FUTURES
+{other_futures_text}
 
-== ACTIONABLE ==
-{actionable_text}
+FOREX
+{forex_text}
 
-== TIPS & REMINDERS ==
-{bullet_lines(s.get("tips_reminders", []))}
+OTHER
+{other_text}
 """
 
 # =========================
@@ -369,28 +384,39 @@ def llm_summarize_to_json(
     
     system_prompt = (
         "You are a professional sell-side research distillation engine for an active multi-asset trader. "
-        "Extract ONLY actionable, market-relevant intelligence. Output MUST be valid JSON only."
+        "Write like a trader: concise, specific, no generic macro lecture. Prefer numbers, levels, dates, and catalysts over adjectives. "
+        "Output MUST be valid JSON only. No markdown, no explanations, just JSON."
     )
     
     user_prompt = (
-        "Create a trader-focused summary in STRICT JSON format:\n"
-        '{"theme": "<1 sentence max 22 words>", '
-        '"tldr": ["<factual statement 1>", ...], '
-        '"key_data": ["<numeric fact 1 with % or levels>", ...], '
-        '"forward_watch": ["<future catalyst/event/level to watch>", ...], '
-        '"actionable": ["<Direction> <Asset> if/when <Trigger> (<Timeframe>)", ...], '
-        '"tips": ["<educational reminder>", ...], '
-        '"products": ["<product1>", ...], '
-        '"score_0_10": 0}\n\n'
-        'RULES:\n'
-        '- theme: Core driver in <=22 words\n'
-        '- tldr: 3-5 factual bullets (NO advice verbs)\n'
-        '- key_data: 3-8 numeric facts with % or levels\n'
-        '- forward_watch: 3-8 future catalysts/events (OK to use "monitor/watch")\n'
-        '- actionable: 3-8 bullets with format "Long/Short X if Y (0-3D/1-2W/>2W)"\n'
-        '- tips: 2-6 educational reminders only\n'
-        '- products: List of relevant products/assets\n'
-        '- score_0_10: Quality score 0-10\n\n'
+        "Create a trader-focused summary. Return ONLY valid JSON with this EXACT structure:\n\n"
+        "{\n"
+        '  "tldr": ["Event → why it matters → impacted assets", ...],\n'
+        '  "trade_ideas": {\n'
+        '    "ES": {"bias": "Bull/Bear/Neutral", "catalyst": "text", "setup": "If/Then text", "key_levels": "text", "risk": "text", "time_horizon": "text"},\n'
+        '    "NQ": {"bias": "Bull/Bear/Neutral", "catalyst": "text", "setup": "If/Then text", "key_levels": "text", "risk": "text", "time_horizon": "text"},\n'
+        '    "GC": {"bias": "Bull/Bear/Neutral", "catalyst": "text", "setup": "If/Then text", "key_levels": "text", "risk": "text", "time_horizon": "text"},\n'
+        '    "SI": {"bias": "Bull/Bear/Neutral", "catalyst": "text", "setup": "If/Then text", "key_levels": "text", "risk": "text", "time_horizon": "text"},\n'
+        '    "VIX": {"bias": "Bull/Bear/Neutral", "catalyst": "text", "setup": "If/Then text", "key_levels": "text", "risk": "text", "time_horizon": "text"}\n'
+        "  },\n"
+        '  "stocks": ["If/Then trigger + ticker/sector + catalyst", ...],\n'
+        '  "other_futures": ["CL: summary text", ...],\n'
+        '  "forex": ["levels/conditions", ...],\n'
+        '  "other": ["low relevance items", ...],\n'
+        '  "score_0_10": 0,\n'
+        '  "chart_score_0_3": 0\n'
+        "}\n\n"
+        "CRITICAL RULES:\n"
+        "1. tldr: MAX 3 bullets. ONLY key geopolitical events + key monetary/fiscal policy events. Format: 'Event → why it matters → impacted assets'\n"
+        "2. trade_ideas: MUST include ES, NQ, GC, SI, VIX keys (even if Neutral). If article doesn't affect a product, use: {\"bias\": \"Neutral\", \"catalyst\": \"No direct trade idea from this article\", \"setup\": \"\", \"key_levels\": \"\", \"risk\": \"\", \"time_horizon\": \"\"}\n"
+        "3. Each trade idea MUST have all 6 fields: bias, catalyst, setup, key_levels, risk, time_horizon\n"
+        "4. stocks: 3-8 bullets ONLY if strongly supported. Format: 'If/Then trigger + ticker/sector + key catalyst'\n"
+        "5. other_futures: Only if relevant (CL, NG, ZN/ZB, HG, etc). Format: 'ProductName: summary text'\n"
+        "6. forex: Only if relevant. 2-6 bullets with levels/conditions\n"
+        "7. other: Everything else / lower relevance. Short bullets only\n"
+        "8. Write like a trader: concise, specific, numbers/levels/dates over adjectives\n"
+        "9. NO generic context paragraphs unless they directly change the trade plan\n"
+        "10. If article has no actionable relevance, compress to 1-2 bullets in 'other'\n\n"
         f"DOCUMENT TEXT:\n<<<\n{text}\n>>>"
     )
     
@@ -432,35 +458,71 @@ def llm_summarize_to_json(
     
     api_response = json.loads(cleaned.strip())
     
-    # Convert API response to twifo.sum.v1 schema (Egypt-format)
+    # Convert API response to new trader-focused schema
     provider = meta.get("provider", "O")
     published_date = meta.get("published_date", "")
     horizon = meta.get("horizon", "")
     
-    # Extract from new streamlined API response
-    theme = api_response.get("theme", "")
+    # Extract from new trader-focused API response
     tldr = api_response.get("tldr", [])
-    key_data = api_response.get("key_data", [])
-    forward_watch = api_response.get("forward_watch", [])
-    actionable = api_response.get("actionable", [])
-    tips = api_response.get("tips", [])
-    products = api_response.get("products", []) or meta.get("products", [])
+    trade_ideas_dict = api_response.get("trade_ideas", {})
+    stocks = api_response.get("stocks", [])
+    other_futures = api_response.get("other_futures", [])
+    forex = api_response.get("forex", [])
+    other = api_response.get("other", [])
     score = api_response.get("score_0_10", 0)
+    chart_score = api_response.get("chart_score_0_3", 0)
     
-    # Fallback to old schema if new fields missing
-    if not tldr:
-        core_summary = api_response.get("core_summary", {})
-        tldr = core_summary.get("tldr", [])
-        key_data = core_summary.get("actionable", [])[:8]
-        tips = core_summary.get("tips_and_reminders", [])
+    # Extract products from trade_ideas keys
+    products = list(trade_ideas_dict.keys()) if trade_ideas_dict else []
     
-    # Ensure theme exists
-    if not theme and tldr:
-        theme = tldr[0] if isinstance(tldr[0], str) else tldr[0].get("text", "")
-        # Truncate to 22 words
-        words = theme.split()
-        if len(words) > 22:
-            theme = " ".join(words[:22])
+    # Generate theme from first TL;DR bullet if needed
+    theme = ""
+    if tldr and isinstance(tldr, list) and len(tldr) > 0:
+        first_tldr = tldr[0] if isinstance(tldr[0], str) else str(tldr[0])
+        words = first_tldr.split()
+        theme = " ".join(words[:22])
+    
+    # Convert trade_ideas dict to list format for storage (preserving structure)
+    # ALWAYS include ES, NQ, GC, SI, VIX in that exact order, even if not in response
+    trade_ideas_list = []
+    priority_products = ["ES", "NQ", "GC", "SI", "VIX"]
+    other_products = sorted([p for p in trade_ideas_dict.keys() if p not in priority_products])
+    
+    # Process priority products first (always include them)
+    for product in priority_products:
+        if product in trade_ideas_dict:
+            idea_data = trade_ideas_dict[product]
+        else:
+            # Create default entry if not present
+            idea_data = {"bias": "Neutral", "catalyst": "No direct trade idea from this article"}
+        
+        if isinstance(idea_data, dict):
+            trade_ideas_list.append({
+                "product": product,
+                "bias": idea_data.get("bias", "Neutral"),
+                "catalyst": idea_data.get("catalyst", ""),
+                "setup": idea_data.get("setup", ""),
+                "key_levels": idea_data.get("key_levels", ""),
+                "risk": idea_data.get("risk", ""),
+                "time_horizon": idea_data.get("time_horizon", ""),
+                "sources": [provider]
+            })
+    
+    # Process other products
+    for product in other_products:
+        idea_data = trade_ideas_dict[product]
+        if isinstance(idea_data, dict):
+            trade_ideas_list.append({
+                "product": product,
+                "bias": idea_data.get("bias", "Neutral"),
+                "catalyst": idea_data.get("catalyst", ""),
+                "setup": idea_data.get("setup", ""),
+                "key_levels": idea_data.get("key_levels", ""),
+                "risk": idea_data.get("risk", ""),
+                "time_horizon": idea_data.get("time_horizon", ""),
+                "sources": [provider]
+            })
     
     return {
         "schema_version": SCHEMA_SUM_V1,
@@ -485,16 +547,21 @@ def llm_summarize_to_json(
         },
         "extraction": meta.get("extraction", {}),
         "sections": {
-            "tldr": [{"text": t, "sources": [provider]} for t in (tldr[:5] if isinstance(tldr, list) else [])],
-            "what_occurred": [{"text": t, "sources": [provider]} for t in (key_data[:8] if isinstance(key_data, list) else [])],
-            "forward_watch": [{"text": t, "sources": [provider]} for t in (forward_watch[:8] if isinstance(forward_watch, list) else [])],
-            "trade_ideas": [{"text": t, "sources": [provider]} for t in (actionable[:8] if isinstance(actionable, list) else [])],
+            "tldr": [{"text": t, "sources": [provider]} for t in (tldr[:3] if isinstance(tldr, list) else [])],
+            "trade_ideas": trade_ideas_list,
+            "stocks": [{"text": t, "sources": [provider]} for t in (stocks[:8] if isinstance(stocks, list) else [])],
+            "other_futures": [{"text": t, "sources": [provider]} for t in (other_futures if isinstance(other_futures, list) else [])],
+            "forex": [{"text": t, "sources": [provider]} for t in (forex[:6] if isinstance(forex, list) else [])],
+            "other": [{"text": t, "sources": [provider]} for t in (other if isinstance(other, list) else [])],
+            "what_occurred": [],
+            "forward_watch": [],
             "warnings": [],
-            "tips_reminders": [{"text": t, "sources": [provider]} for t in (tips[:6] if isinstance(tips, list) else [])],
+            "tips_reminders": [],
             "cross_asset_impacts": [],
             "scenarios": []
         },
-        "summary_score_0_10": score
+        "summary_score_0_10": score,
+        "chart_score_0_3": chart_score
     }
 
 def summarize_text(

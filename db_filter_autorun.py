@@ -34,6 +34,16 @@ except ImportError as e:
     PDF_RENDER_AVAILABLE = False
     render_summary_pdf = None
 
+# Import rollup generation
+try:
+    from generate_rollup_clean import generate_daily_rollup, save_daily_rollup
+    ROLLUP_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Rollup generation not available: {e}")
+    ROLLUP_AVAILABLE = False
+    generate_daily_rollup = None
+    save_daily_rollup = None
+
 # =============================
 # CONFIG — EDIT THESE ONCE
 # =============================
@@ -701,6 +711,18 @@ def main():
         total_copied += copied
         total_skipped += skipped
         total_summary_skipped += summary_skipped
+        
+        # Generate daily rollup for this date (if rollup generation is available)
+        if ROLLUP_AVAILABLE and generate_daily_rollup and save_daily_rollup:
+            try:
+                rollup = generate_daily_rollup(target_day, min_articles=1)
+                if rollup:
+                    save_daily_rollup(rollup, target_day)
+                    print(f"[OK] Daily rollup created for {target_day}")
+                else:
+                    print(f"[INFO] No daily rollup created for {target_day} (insufficient articles or already exists)")
+            except Exception as e:
+                print(f"[WARN] Failed to generate daily rollup for {target_day}: {e}")
 
     if total_skipped > 0:
         print(f"\n[DONE] Copied {total_copied} files ({total_skipped} duplicates skipped) to {EXPORT_DIR}")
