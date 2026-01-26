@@ -245,26 +245,38 @@ def write_failed_summary_stub(dst_pdf: Path, reason: str) -> None:
     """
     Creates a __sum.json that clearly indicates extraction failure so the website can display
     'Needs OCR' instead of hallucinated content.
+    
+    Returns unified schema matching _failed_stub() from summarize_pdf.py
     """
     stub = {
+        "schema_version": "twifo.sum.v1",
+        "kind": "article",
         "meta": {
             "source_pdf": dst_pdf.name,
             "generated_at_iso": dt.datetime.now().isoformat(timespec="seconds"),
             "model": None,
-            "extraction": {
-                "status": "failed",
-                "reason": reason,
-            },
+            "provider": "O",
+            "title": dst_pdf.stem,
+            "published_date": "",
+            "horizon": "u",
         },
-        "scan": {
-            "tldr": [f"Summary unavailable: {reason}"],
-            "top_actionables": [],
-            "score": {"summary_score_0_10": 0, "chart_score_0_3": 0, "why": "Extraction failed"},
+        "ui": {"header_pills": []},
+        "extraction": {
+            "status": "failed",
+            "reason": reason,
         },
-        "deep_dive": {"topic_map": [], "cross_asset_impacts": [], "scenarios": [], "appendix_extra_insights": []},
-        "summary_score_0_10": 0,
-        "chart_score_0_3": 0,
-        "product_categories": {},
+        "sections": {
+            "what_moved_today": [],
+            "what_can_move_tomorrow": [],
+            "trade_ideas": [],
+            "tldr": [],
+            "what_occurred": [],
+            "forward_watch": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
     }
     summary_json_path = dst_pdf.parent / f"{dst_pdf.stem}__sum.json"
     summary_json_path.write_text(json.dumps(stub, indent=2), encoding="utf-8")

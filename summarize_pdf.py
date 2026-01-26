@@ -81,6 +81,15 @@ def _sum_paths(pdf_path: Path, out_dir: Optional[Path] = None) -> Tuple[Path, Pa
     return (Path(str(base) + "__sum.json"), Path(str(base) + "__sum.txt"))
 
 def _failed_stub(pdf_path: Path, reason: str, extraction: dict, meta: dict) -> dict:
+    """
+    Unified failure stub with deterministic schema.
+    
+    Required keys:
+    - Primary: what_moved_today, what_can_move_tomorrow, trade_ideas
+    - Legacy: tldr, what_occurred, forward_watch, warnings, tips_reminders, cross_asset_impacts, scenarios
+    
+    All values are lists, no strings, no optional keys.
+    """
     return {
         "schema_version": SCHEMA_SUM_V1,
         "kind": "article",
@@ -90,12 +99,14 @@ def _failed_stub(pdf_path: Path, reason: str, extraction: dict, meta: dict) -> d
             "model": meta.get("model", MODEL),
         },
         "ui": {"header_pills": []},
-        "extraction": {**extraction, "status": "failed"},
+        "extraction": {**extraction, "status": "failed", "reason": reason},
         "sections": {
-            "tldr": [{"text": f"Summary unavailable: {reason}", "sources": [meta.get("provider","O")]}],
+            "what_moved_today": [],
+            "what_can_move_tomorrow": [],
+            "trade_ideas": [],
+            "tldr": [],
             "what_occurred": [],
             "forward_watch": [],
-            "trade_ideas": [],
             "warnings": [],
             "tips_reminders": [],
             "cross_asset_impacts": [],
