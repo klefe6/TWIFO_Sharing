@@ -22,46 +22,10 @@ SCHEMA_SUM_V1 = "twifo.sum.v1"
 MIN_TEXT_CHARS = 1500  # for external PDFs; tune based on your typical reports
 MAX_INPUT_CHARS = 50000
 
-# Load API key (reuse existing logic)
-def load_api_key() -> str | None:
-    """Load OPENAI_API_KEY from multiple sources."""
-    script_dir = Path(__file__).parent
-    
-    # Try .env file
-    try:
-        from dotenv import load_dotenv
-        env_file = script_dir / ".env"
-        if env_file.exists():
-            load_dotenv(env_file)
-            key = os.getenv("OPENAI_API_KEY")
-            if key:
-                return key
-    except ImportError:
-        pass
-    
-    # Try .env manually
-    env_file = script_dir / ".env"
-    if env_file.exists():
-        try:
-            with open(env_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('OPENAI_API_KEY='):
-                        key = line.split('=', 1)[1].strip().strip('"').strip("'")
-                        if key:
-                            return key
-        except Exception:
-            pass
-    
-    # Try environment variable
-    key = os.getenv("OPENAI_API_KEY")
-    if key:
-        return key
-    
-    return None
-
+# Load API key from environment (set by db_filter_autorun.py)
+# Note: Do NOT read .env directly here to avoid silent overrides
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_API_KEY = load_api_key()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # =========================
 # Utilities
@@ -114,8 +78,129 @@ def _failed_stub(pdf_path: Path, reason: str, extraction: dict, meta: dict) -> d
         }
     }
 
+def is_low_quality_summary(sum_json: dict) -> tuple[bool, str]:
+    """
+    Detect low-quality/templated LLM output that should fail.
+    
+    Returns:
+        (is_low_quality: bool, reason: str)
+    
+    Detects:
+    - Repeated bullets (copy-paste behavior)
+    - Generic placeholder phrases
+    - Too few unique informative bullets
+    """
+    sections = sum_json.get("sections", {})
+    
+    # Collect all text bullets from sections
+    all_bullets = []
+    for key in ["tldr", "what_occurred", "forward_watch", "warnings", "tips_reminders", 
+                "cross_asset_impacts", "scenarios", "stocks", "other_futures", "forex", "other"]:
+        items = sections.get(key, [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    text = item.get("text", "").strip().lower()
+                    if text:
+                        all_bullets.append(text)
+                elif isinstance(item, str):
+                    text = item.strip().lower()
+                    if text:
+                        all_bullets.append(text)
+    
+    # Also check trade_ideas if they exist
+    trade_ideas = sections.get("trade_ideas", [])
+    for item in trade_ideas:
+        if isinstance(item, dict):
+            for field in ["catalyst", "setup", "key_levels", "risk", "trigger"]:
+                text = item.get(field, "").strip().lower()
+                if text:
+                    all_bullets.append(text)
+    
+    # Check 1: Too few unique bullets (excluding empty/placeholder content)
+    unique_bullets = set(all_bullets)
+    if len(unique_bullets) < 3:
+        return True, f"too_few_unique_bullets: only {len(unique_bullets)} unique bullets found"
+    
+    # Check 2: Detect repeated bullets (exact duplicates)
+    if len(all_bullets) > len(unique_bullets) * 1.5:  # More than 50% duplication
+        duplication_rate = (len(all_bullets) - len(unique_bullets)) / len(all_bullets) * 100
+        return True, f"excessive_duplication: {duplication_rate:.0f}% of bullets are duplicates"
+    
+    # Check 3: Generic placeholder phrases
+    placeholder_phrases = [
+        "pending analysis",
+        "monitor key levels",
+        "data releases",
+        "await further information",
+        "to be determined",
+        "no specific",
+        "not specified",
+        "monitor developments",
+        "watch for updates",
+        "pending clarification",
+        "subject to change",
+        "more details needed",
+        "insufficient information",
+        "data not available",
+        "no direct trade idea from this article",  # OK for neutral products
+    ]
+    
+    # Count how many bullets are just placeholders
+    placeholder_count = 0
+    for bullet in all_bullets:
+        # Skip the "no direct trade idea" phrase - that's valid for neutral products
+        if "no direct trade idea from this article" in bullet:
+            continue
+        for phrase in placeholder_phrases:
+            if phrase in bullet:
+                placeholder_count += 1
+                break
+    
+    # If more than 40% of bullets are placeholders, fail
+    if len(all_bullets) > 0 and placeholder_count / len(all_bullets) > 0.4:
+        placeholder_rate = placeholder_count / len(all_bullets) * 100
+        return True, f"excessive_placeholders: {placeholder_rate:.0f}% of bullets are generic placeholders"
+    
+    # Check 4: Detect suspiciously short bullets (likely low-effort)
+    short_bullet_count = sum(1 for b in all_bullets if len(b) < 20)
+    if len(all_bullets) > 0 and short_bullet_count / len(all_bullets) > 0.6:
+        short_rate = short_bullet_count / len(all_bullets) * 100
+        return True, f"excessive_short_bullets: {short_rate:.0f}% of bullets are < 20 chars"
+    
+    # Passed all checks
+    return False, ""
+
+
 def render_sum_txt(sum_json: dict) -> str:
-    """Human-readable TXT mirror of the JSON."""
+    """
+    Human-readable TXT mirror of the JSON.
+    Handles both successful summaries and failed extractions.
+    """
+    meta = sum_json.get("meta", {})
+    title = meta.get("title", "")
+    extraction = sum_json.get("extraction", {})
+    
+    # Check if extraction failed
+    if extraction.get("status") != "ok":
+        reason = extraction.get("reason", "unknown error")
+        return f"""{title}
+
+SUMMARY UNAVAILABLE
+
+Extraction Status: FAILED
+Reason: {reason}
+
+This document could not be processed. Possible causes:
+- Image-only PDF requiring OCR
+- Low-quality extraction
+- Templated/low-information LLM output
+- Insufficient readable text
+
+No summary will be generated for this document.
+"""
+    
+    # Normal rendering for successful summaries
     meta = sum_json.get("meta", {})
     prov = meta.get("provider", "")
     date = meta.get("published_date", "")
@@ -315,18 +400,20 @@ def llm_summarize_to_json(
     """
     Call OpenAI API and convert response to twifo.sum.v1 schema.
     """
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY not set")
+    from openai_client import get_client
+    from auth_env import describe_key
     
     if not text.strip():
         raise ValueError("No text provided to summarizer")
-
-    import requests
     
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    # Get unified OpenAI client (same instance as preflight)
+    client = get_client()
+    
+    # Debug logging
+    key = os.getenv("OPENAI_API_KEY", "")
+    prefix = describe_key(key) if key else "<none>"
+    base_url = client.base_url if hasattr(client, 'base_url') else "default"
+    print(f"[DEBUG] LLM call: model={model}, key_prefix={prefix}, base_url={base_url}")
     
     system_prompt = (
         "You are a professional sell-side research distillation engine for an active multi-asset trader. "
@@ -341,29 +428,22 @@ def llm_summarize_to_json(
         f"DOCUMENT TEXT:\n<<<\n{text}\n>>>"
     )
     
-    payload = {
-        "model": model,
-        "input": [
+    # Call OpenAI API using unified client
+    response = client.responses.create(
+        model=model,
+        input=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_output_tokens": 900,
-    }
-    
-    r = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers=headers,
-        json=payload,
-        timeout=120,
+        max_output_tokens=900,
     )
-    r.raise_for_status()
-    data = r.json()
     
+    # Extract text from response
     out_text = ""
-    for item in data.get("output", []):
-        for c in item.get("content", []):
-            if c.get("type") == "output_text":
-                out_text += c.get("text", "")
+    for item in response.output:
+        for content_item in item.content:
+            if content_item.type == "output_text":
+                out_text += content_item.text
     
     if not out_text:
         raise ValueError("API returned empty output text")
@@ -488,6 +568,27 @@ def summarize_text(
     except Exception as e:
         sum_json = _failed_stub(fake_pdf, reason=str(e), extraction=meta["extraction"], meta=meta)
 
+    # Quality gate: detect low-quality/templated output
+    is_low_quality, quality_reason = is_low_quality_summary(sum_json)
+    if is_low_quality:
+        print(f"[QUALITY GATE] Summary failed quality check: {quality_reason}")
+        # Preserve meta but mark as failed and use unified failure stub
+        sum_json["extraction"]["status"] = "failed"
+        sum_json["extraction"]["reason"] = f"low_quality_output: {quality_reason}"
+        # Replace sections with empty unified failure stub
+        sum_json["sections"] = {
+            "what_moved_today": [],
+            "what_can_move_tomorrow": [],
+            "trade_ideas": [],
+            "tldr": [],
+            "what_occurred": [],
+            "forward_watch": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+
     _write_json(json_path, sum_json)
     _write_txt(txt_path, render_sum_txt(sum_json))
     return sum_json
@@ -559,6 +660,27 @@ def summarize_pdf(
         sum_json = llm_summarize_to_json(text, meta=meta, model=model)
     except Exception as e:
         sum_json = _failed_stub(pdf_path, reason=str(e), extraction=extraction, meta=meta)
+
+    # Quality gate: detect low-quality/templated output
+    is_low_quality, quality_reason = is_low_quality_summary(sum_json)
+    if is_low_quality:
+        print(f"[QUALITY GATE] Summary failed quality check: {quality_reason}")
+        # Preserve meta but mark as failed and use unified failure stub
+        sum_json["extraction"]["status"] = "failed"
+        sum_json["extraction"]["reason"] = f"low_quality_output: {quality_reason}"
+        # Replace sections with empty unified failure stub
+        sum_json["sections"] = {
+            "what_moved_today": [],
+            "what_can_move_tomorrow": [],
+            "trade_ideas": [],
+            "tldr": [],
+            "what_occurred": [],
+            "forward_watch": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
 
     _write_json(json_path, sum_json)
     _write_txt(txt_path, render_sum_txt(sum_json))

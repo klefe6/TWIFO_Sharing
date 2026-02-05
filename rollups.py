@@ -194,11 +194,16 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
         return _group_by_product(items)
 
     # Aggregate trade ideas by product (new structure)
-    # Trade ideas now structured by product with: product, bias, catalyst, setup, key_levels, risk, time_horizon
+    # Trade ideas now structured by product with: product, bias, catalyst, setup, key_levels, risk, time_horizon, volatility_impact
+    # HARD RULE: Only extract exact strings from article JSON - NO HALLUCINATION
     trade_ideas_by_product = {}
     for a in article_sum_jsons:
         article_trades = a.get("sections", {}).get("trade_ideas", []) or []
         provider = a.get("meta", {}).get("provider", "O")
+        
+        # Extract volatility_impact from article if present
+        article_volatility = a.get("volatility_impact", "") or a.get("sections", {}).get("volatility_impact", "")
+        
         for t in article_trades:
             if not isinstance(t, dict):
                 continue
@@ -216,21 +221,43 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
                     "key_levels": [],
                     "risk": [],
                     "time_horizon": [],
+                    "volatility_impact": [],
                     "sources": []
                 }
             
-            # Aggregate fields (collect unique values)
+            # Aggregate fields (collect unique values) - ONLY from article JSON, no invention
             prod_entry = trade_ideas_by_product[product]
-            if t.get("catalyst") and t.get("catalyst") not in prod_entry["catalyst"]:
-                prod_entry["catalyst"].append(t.get("catalyst"))
-            if t.get("setup") and t.get("setup") not in prod_entry["setup"]:
-                prod_entry["setup"].append(t.get("setup"))
-            if t.get("key_levels") and t.get("key_levels") not in prod_entry["key_levels"]:
-                prod_entry["key_levels"].append(t.get("key_levels"))
-            if t.get("risk") and t.get("risk") not in prod_entry["risk"]:
-                prod_entry["risk"].append(t.get("risk"))
-            if t.get("time_horizon") and t.get("time_horizon") not in prod_entry["time_horizon"]:
-                prod_entry["time_horizon"].append(t.get("time_horizon"))
+            
+            # Extract catalyst - only if present in article
+            catalyst = t.get("catalyst", "")
+            if catalyst and isinstance(catalyst, str) and catalyst.strip() and catalyst not in prod_entry["catalyst"]:
+                prod_entry["catalyst"].append(catalyst.strip())
+            
+            # Extract setup - only if present in article
+            setup = t.get("setup", "")
+            if setup and isinstance(setup, str) and setup.strip() and setup not in prod_entry["setup"]:
+                prod_entry["setup"].append(setup.strip())
+            
+            # Extract key_levels - CRITICAL: only exact strings from article, no hallucination
+            key_levels = t.get("key_levels", "")
+            if key_levels and isinstance(key_levels, str) and key_levels.strip() and key_levels not in prod_entry["key_levels"]:
+                prod_entry["key_levels"].append(key_levels.strip())
+            
+            # Extract risk - only if present in article
+            risk = t.get("risk", "")
+            if risk and isinstance(risk, str) and risk.strip() and risk not in prod_entry["risk"]:
+                prod_entry["risk"].append(risk.strip())
+            
+            # Extract time_horizon - only if present in article
+            time_horizon = t.get("time_horizon", "")
+            if time_horizon and isinstance(time_horizon, str) and time_horizon.strip() and time_horizon not in prod_entry["time_horizon"]:
+                prod_entry["time_horizon"].append(time_horizon.strip())
+            
+            # Extract volatility_impact - only if present in article or trade idea
+            vol_impact = t.get("volatility_impact", "") or article_volatility
+            if vol_impact and isinstance(vol_impact, str) and vol_impact.strip() and vol_impact not in prod_entry["volatility_impact"]:
+                prod_entry["volatility_impact"].append(vol_impact.strip())
+            
             if provider not in prod_entry["sources"]:
                 prod_entry["sources"].append(provider)
             
@@ -239,24 +266,47 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             if bias != "Neutral" and prod_entry["bias"] == "Neutral":
                 prod_entry["bias"] = bias
     
-    # Convert to list format, prioritizing ES, NQ, GC, SI, VIX
-    priority_products = ["ES", "NQ", "GC", "SI", "VIX"]
-    other_products = [p for p in trade_ideas_by_product.keys() if p not in priority_products]
+    # Global product ordering: Indices → Rates → Metals → Crypto → Others
+    def _product_sort_key(product: str) -> tuple:
+        """Sort products by category priority, then alphabetically within category."""
+        # Indices (priority 1)
+        indices = ["ES", "NQ", "RTY", "Dow", "VIX"]
+        # Rates (priority 2)
+        rates = ["ZN", "ZB", "ZF", "ZT", "TN", "UB", "2Y", "10Y", "30Y"]
+        # Metals (priority 3)
+        metals = ["GC", "SI", "HG", "PL", "PA"]
+        # Crypto (priority 4)
+        crypto = ["BTC", "ETH"]
+        
+        if product in indices:
+            return (1, indices.index(product))
+        elif product in rates:
+            return (2, rates.index(product))
+        elif product in metals:
+            return (3, metals.index(product))
+        elif product in crypto:
+            return (4, crypto.index(product))
+        else:
+            return (5, product)  # Others, alphabetically
+    
+    # Sort products by global ordering
+    sorted_products = sorted(trade_ideas_by_product.keys(), key=_product_sort_key)
+    
     trade_ideas_list = []
-    for product in priority_products + sorted(other_products):
-        if product in trade_ideas_by_product:
-            entry = trade_ideas_by_product[product]
-            # Combine lists into strings
-            trade_ideas_list.append({
-                "product": product,
-                "bias": entry["bias"],
-                "catalyst": "; ".join(entry["catalyst"]) if entry["catalyst"] else "",
-                "setup": "; ".join(entry["setup"]) if entry["setup"] else "",
-                "key_levels": "; ".join(entry["key_levels"]) if entry["key_levels"] else "",
-                "risk": "; ".join(entry["risk"]) if entry["risk"] else "",
-                "time_horizon": "; ".join(entry["time_horizon"]) if entry["time_horizon"] else "",
-                "sources": sorted(entry["sources"])
-            })
+    for product in sorted_products:
+        entry = trade_ideas_by_product[product]
+        # Deduplicate and combine lists into strings - only use exact strings from articles
+        trade_ideas_list.append({
+            "product": product,
+            "bias": entry["bias"],
+            "catalyst": "; ".join(entry["catalyst"]) if entry["catalyst"] else "",
+            "setup": "; ".join(entry["setup"]) if entry["setup"] else "",
+            "key_levels": "; ".join(entry["key_levels"]) if entry["key_levels"] else "",
+            "risk": "; ".join(entry["risk"]) if entry["risk"] else "",
+            "time_horizon": "; ".join(entry["time_horizon"]) if entry["time_horizon"] else "",
+            "volatility_impact": "; ".join(entry["volatility_impact"]) if entry["volatility_impact"] else "",
+            "sources": sorted(entry["sources"])
+        })
 
     # Derive consensus catalysts (from common catalysts in trade ideas)
     all_catalysts = []
@@ -521,6 +571,7 @@ def render_rollup_txt(r: dict) -> str:
         key_levels = item.get("key_levels", "")
         risk = item.get("risk", "")
         time_horizon = item.get("time_horizon", "")
+        volatility_impact = item.get("volatility_impact", "")
         
         if bias == "Neutral" and not catalyst:
             continue  # Skip products with no meaningful trade ideas
@@ -537,6 +588,8 @@ def render_rollup_txt(r: dict) -> str:
             trade_ideas_text.append(f"  Risk: {risk}")
         if time_horizon:
             trade_ideas_text.append(f"  Time Horizon: {time_horizon}")
+        if volatility_impact:
+            trade_ideas_text.append(f"  Volatility Impact: {volatility_impact}")
     
     trade_ideas_output = "\n".join(trade_ideas_text) if trade_ideas_text else "• (none)"
     

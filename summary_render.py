@@ -440,6 +440,113 @@ def create_chips_row_simple(chip_texts: List[str], label: str = "") -> Optional[
     return Paragraph(full_text, chip_style)
 
 
+def _render_failed_summary_pdf(output_path: Path, summary: dict) -> bool:
+    """
+    Render a clear failure page for failed extractions.
+    
+    Args:
+        output_path: Path to output PDF
+        summary: Summary JSON with failed extraction status
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if not REPORTLAB_AVAILABLE:
+        return False
+    
+    try:
+        doc = SimpleDocTemplate(
+            str(output_path),
+            pagesize=letter,
+            rightMargin=inch,
+            leftMargin=inch,
+            topMargin=inch,
+            bottomMargin=inch
+        )
+        
+        story = []
+        styles = getSampleStyleSheet()
+        
+        # Title
+        meta = summary.get("meta", {})
+        title = meta.get("title", "Unknown Document")
+        extraction = summary.get("extraction", {})
+        reason = extraction.get("reason", "unknown error")
+        
+        # Title style
+        title_style = ParagraphStyle(
+            'FailedTitle',
+            parent=styles['Title'],
+            fontSize=18,
+            textColor=colors.HexColor('#DC3545'),  # Red
+            spaceAfter=12,
+            alignment=TA_CENTER
+        )
+        
+        # Subtitle style
+        subtitle_style = ParagraphStyle(
+            'FailedSubtitle',
+            parent=styles['Normal'],
+            fontSize=14,
+            textColor=colors.HexColor('#6C757D'),
+            spaceAfter=24,
+            alignment=TA_CENTER
+        )
+        
+        # Body style
+        body_style = ParagraphStyle(
+            'FailedBody',
+            parent=styles['Normal'],
+            fontSize=11,
+            textColor=colors.HexColor('#212529'),
+            spaceAfter=12,
+            leftIndent=20
+        )
+        
+        # Add content
+        story.append(Paragraph("SUMMARY UNAVAILABLE", title_style))
+        story.append(Spacer(1, 0.2*inch))
+        story.append(Paragraph(f"Document: {title}", subtitle_style))
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Error box
+        error_data = [[Paragraph(f"<b>Extraction Status:</b> FAILED", body_style)],
+                      [Paragraph(f"<b>Reason:</b> {reason}", body_style)]]
+        
+        error_table = Table(error_data, colWidths=[5.5*inch])
+        error_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FFF3CD')),
+            ('BOX', (0, 0), (-1, -1), 2, colors.HexColor('#FFC107')),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ]))
+        
+        story.append(error_table)
+        story.append(Spacer(1, 0.4*inch))
+        
+        # Explanation
+        story.append(Paragraph("<b>This document could not be processed.</b>", body_style))
+        story.append(Spacer(1, 0.1*inch))
+        story.append(Paragraph("Possible causes:", body_style))
+        story.append(Paragraph("• Image-only PDF requiring OCR", body_style))
+        story.append(Paragraph("• Low-quality text extraction", body_style))
+        story.append(Paragraph("• Templated/low-information LLM output", body_style))
+        story.append(Paragraph("• Insufficient readable text content", body_style))
+        story.append(Spacer(1, 0.3*inch))
+        story.append(Paragraph("<b>No summary will be generated for this document.</b>", body_style))
+        
+        # Build PDF
+        doc.build(story)
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to render failure PDF: {e}")
+        return False
+
+
 def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> bool:
     """
     Generate professional trader-focused PDF from JSON summary.
@@ -479,6 +586,11 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
     # Determine output path
     if output_path is None:
         output_path = json_path.parent / f"{json_path.stem}.pdf"
+    
+    # Check if extraction failed - render failure page instead
+    extraction = summary.get("extraction", {})
+    if extraction.get("status") != "ok":
+        return _render_failed_summary_pdf(output_path, summary)
     
     try:
         # Create PDF

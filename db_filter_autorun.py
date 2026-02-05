@@ -16,6 +16,17 @@ try:
 except Exception:
     PYPDF_AVAILABLE = False
 
+# Import authentication module (single source-of-truth)
+try:
+    from auth_env import get_openai_api_key, describe_key, assert_openai_auth_ok
+    AUTH_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Auth module not available: {e}")
+    AUTH_AVAILABLE = False
+    get_openai_api_key = None
+    describe_key = None
+    assert_openai_auth_ok = None
+
 # Import summarization module
 try:
     from summarize_pdf import summarize_pdf, summarize_text
@@ -705,6 +716,39 @@ def get_date_range() -> list[dt.date]:
         return [dt.date.today() - dt.timedelta(days=1)]
 
 def main():
+    # Step 1: Load OpenAI API key (single source-of-truth)
+    if AUTH_AVAILABLE and SUMMARIZE_AVAILABLE:
+        print("[INFO] Loading OpenAI API key...")
+        try:
+            api_key = get_openai_api_key()
+            # Detect source
+            from pathlib import Path
+            env_file = Path(__file__).parent / ".env"
+            if env_file.exists():
+                with open(env_file, 'r', encoding='utf-8') as f:
+                    if 'OPENAI_API_KEY=' in f.read():
+                        source = ".env file"
+                    else:
+                        source = "environment variable"
+            else:
+                source = "environment variable"
+            
+            # Set in os.environ so all child modules use it
+            os.environ['OPENAI_API_KEY'] = api_key
+            prefix = describe_key(api_key)
+            print(f"[INFO] API key loaded from {source} (prefix={prefix})")
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[ERROR] Failed to load API key: {e}")
+            raise SystemExit(1)
+        
+        # Step 2: Verify authentication with OpenAI
+        print("[INFO] Verifying OpenAI API authentication...")
+        base_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        assert_openai_auth_ok(base_model)
+        print("[INFO] OpenAI API authentication OK")
+    
     check_ocr_env()
     
     if START_DELAY_SECONDS > 0:
