@@ -40,7 +40,7 @@ def smoke_test_single_pdf(pdf_path: str):
         print("[START] Running summarization with quality retry...")
         print()
         
-        result = summarize_pdf(pdf, allow_ocr=False)  # No OCR for speed
+        result, json_path = summarize_pdf(pdf, allow_ocr=False)  # No OCR for speed
         
         print()
         print("=" * 80)

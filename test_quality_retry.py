@@ -128,17 +128,22 @@ def test_normalized_bullet_extraction():
     
     from summarize_pdf import _extract_bullet_text, _normalize_sections_in_place
     
-    # Test various bullet formats
+    # Test various bullet formats - the stronger implementation supports multiple keys
     test_cases = [
         ("string bullet", "string bullet"),
         ({"text": "dict with text"}, "dict with text"),
-        ({"bullet": "dict with bullet key"}, "dict with bullet key"),
-        ({"value": "dict with value key"}, "dict with value key"),
+        ({"bullet": "fallback key"}, "fallback key"),  # Supported via fallback
+        ({"value": "fallback key"}, "fallback key"),   # Supported via fallback
+        ({"content": "another fallback"}, "another fallback"),  # Supported via fallback
+        ({"item": "item key"}, "item key"),  # Supported via fallback
+        ({"summary": "summary key"}, "summary key"),  # Supported via fallback
+        ({}, ""),  # Empty dict returns empty string
+        ({"unknown_key": "value"}, ""),  # Unsupported key returns empty string
     ]
     
     for item, expected in test_cases:
         result = _extract_bullet_text(item)
-        assert result == expected, f"Expected '{expected}', got '{result}'"
+        assert result == expected, f"For {item}, expected '{expected}', got '{result}'"
     
     # Test normalization in-place
     sum_json = {
@@ -146,7 +151,7 @@ def test_normalized_bullet_extraction():
             "what_moved_today": [
                 "raw string",
                 {"text": "normal dict"},
-                {"bullet": "alt key dict"},
+                {"text": "another dict"},
             ],
             "trade_ideas": [{"product": "ES"}]  # Should skip trade_ideas
         }
@@ -196,6 +201,105 @@ def test_debug_artifact_structure():
         print(f"  [PASS] Debug artifact has all required fields")
 
 
+def test_banned_phrase_triggers_retry():
+    """
+    Test that banned phrases trigger quality gate failure.
+    """
+    print("\n[TEST 6] Banned phrase triggers retry")
+    
+    from summarize_pdf import is_low_quality_summary
+    
+    fixture_with_banned_phrase = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation"},
+                {"text": "Market data pending analysis for further insights"},
+                {"text": "European energy crisis intensified"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected"},
+                {"text": "European natural gas TTF futures surged 12%"},
+                {"text": "German manufacturing PMI contracted to 48.2"}
+            ],
+            "forward_watch": [],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(fixture_with_banned_phrase)
+    
+    assert is_low_quality, "Fixture with banned phrase should fail quality gate"
+    assert "filler:banned_phrase" in reason, f"Expected filler:banned_phrase, got: {reason}"
+    assert "market data pending analysis" in reason, f"Expected banned phrase in reason, got: {reason}"
+    print(f"  [PASS] Quality gate correctly detects banned phrase: {reason}")
+
+
+def test_section_repetition_triggers_retry():
+    """
+    Test that section-level repetition triggers quality gate failure.
+    """
+    print("\n[TEST 7] Section repetition triggers retry")
+    
+    from summarize_pdf import is_low_quality_summary
+    
+    fixture_with_repetition = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation"},
+                {"text": "European energy crisis intensified"},
+                {"text": "China manufacturing PMI beat expectations"}
+            ],
+            "what_occurred": [
+                {"text": "Watch for volatility around key support levels"},
+                {"text": "Watch for volatility around key support levels"},
+                {"text": "German manufacturing PMI contracted to 48.2"}
+            ],
+            "forward_watch": [
+                {"text": "EU energy ministers meeting Thursday"},
+                {"text": "Russian gas flows monitoring continues"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(fixture_with_repetition)
+    
+    assert is_low_quality, "Fixture with section repetition should fail quality gate"
+    assert "filler:repeated_bullets" in reason, f"Expected filler:repeated_bullets, got: {reason}"
+    assert "what_occurred" in reason, f"Expected section name in reason, got: {reason}"
+    print(f"  [PASS] Quality gate correctly detects section repetition: {reason}")
+
+
+def test_filler_failure_reason_format():
+    """
+    Test that filler failures use the filler: prefix for stub generation.
+    """
+    print("\n[TEST 8] Filler failure reason format")
+    
+    from summarize_pdf import _failed_stub
+    
+    stub = _failed_stub(
+        pdf_path=Path("test.pdf"),
+        reason="low_quality_output:filler:banned_phrase",
+        extraction={"status": "failed", "attempt_count": 2, "quality_reason": "filler:banned_phrase: 'market data pending analysis' found"},
+        meta={"title": "Test", "provider": "T", "model": "gpt-4o"}
+    )
+    
+    assert stub["extraction"]["status"] == "failed", "Stub must have status=failed"
+    assert "low_quality_output" in stub["extraction"]["reason"], "Reason must contain low_quality_output"
+    assert "filler" in stub["extraction"]["reason"], "Reason must contain filler indicator"
+    print(f"  [PASS] Filler failure reason correctly formatted in stub")
+
+
 def run_all_tests():
     """
     Run all unit tests.
@@ -210,6 +314,9 @@ def run_all_tests():
         test_stub_on_double_failure()
         test_normalized_bullet_extraction()
         test_debug_artifact_structure()
+        test_banned_phrase_triggers_retry()
+        test_section_repetition_triggers_retry()
+        test_filler_failure_reason_format()
         
         print("\n" + "=" * 80)
         print("ALL TESTS PASSED")
@@ -220,6 +327,8 @@ def run_all_tests():
         print("- Debug artifacts on each failure")
         print("- Stub returned if both fail")
         print("- Bullet normalization prevents 0 unique bullets")
+        print("- Banned phrases trigger quality gate failure")
+        print("- Section-level repetition triggers quality gate failure")
         
     except AssertionError as e:
         print(f"\n[FAIL] Test failed: {e}")

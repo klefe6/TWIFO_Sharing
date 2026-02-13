@@ -275,6 +275,184 @@ def test_completely_empty_summary():
     print(f"  [PASS] Detected: {reason}")
 
 
+def test_banned_phrase_market_data_pending():
+    """Test detection of banned phrase 'market data pending analysis'."""
+    print("\n[TEST 8] Banned phrase: 'market data pending analysis'")
+    
+    summary_with_banned_phrase = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation above 3% target"},
+                {"text": "European energy crisis intensified as Russian gas flows dropped 40% week-over-week"},
+                {"text": "Market data pending analysis for further insights"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected, core PCE at 3.4%"},
+                {"text": "European natural gas TTF futures surged 12% to €95/MWh on supply concerns"},
+                {"text": "German manufacturing PMI contracted to 48.2 vs 49.0 expected"}
+            ],
+            "forward_watch": [
+                {"text": "EU energy ministers meeting Thursday to discuss price caps"},
+                {"text": "Russian gas flows via Nord Stream 1 - currently at 20% capacity"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(summary_with_banned_phrase)
+    assert is_low_quality, "Should detect banned phrase 'market data pending analysis'"
+    assert "filler:banned_phrase" in reason, f"Expected 'filler:banned_phrase' in reason, got: {reason}"
+    assert "market data pending analysis" in reason, f"Expected banned phrase in reason, got: {reason}"
+    print(f"  [PASS] Detected: {reason}")
+
+
+def test_banned_phrase_monitor_key_levels():
+    """Test detection of banned phrase 'monitor key levels and data releases'."""
+    print("\n[TEST 9] Banned phrase: 'monitor key levels and data releases'")
+    
+    summary_with_banned_phrase = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation above 3% target"},
+                {"text": "European energy crisis intensified as Russian gas flows dropped 40% week-over-week"},
+                {"text": "China manufacturing PMI beat at 52.1 vs 50.5 expected"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected, core PCE at 3.4%"},
+                {"text": "European natural gas TTF futures surged 12% to €95/MWh on supply concerns"},
+                {"text": "German manufacturing PMI contracted to 48.2 vs 49.0 expected"}
+            ],
+            "forward_watch": [
+                {"text": "Monitor key levels and data releases for trading opportunities"},
+                {"text": "Russian gas flows via Nord Stream 1 - currently at 20% capacity"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(summary_with_banned_phrase)
+    assert is_low_quality, "Should detect banned phrase 'monitor key levels and data releases'"
+    assert "filler:banned_phrase" in reason, f"Expected 'filler:banned_phrase' in reason, got: {reason}"
+    assert "monitor key levels and data releases" in reason, f"Expected banned phrase in reason, got: {reason}"
+    print(f"  [PASS] Detected: {reason}")
+
+
+def test_banned_phrase_case_insensitive():
+    """Test that banned phrase detection is case-insensitive."""
+    print("\n[TEST 10] Banned phrase detection (case-insensitive)")
+    
+    summary_with_uppercase_banned = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation above 3% target"},
+                {"text": "European energy crisis intensified as Russian gas flows dropped 40% week-over-week"},
+                {"text": "MARKET DATA PENDING ANALYSIS for next session"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected, core PCE at 3.4%"},
+                {"text": "European natural gas TTF futures surged 12% to €95/MWh on supply concerns"},
+                {"text": "German manufacturing PMI contracted to 48.2 vs 49.0 expected"}
+            ],
+            "forward_watch": [
+                {"text": "EU energy ministers meeting Thursday to discuss price caps"},
+                {"text": "Russian gas flows via Nord Stream 1 - currently at 20% capacity"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(summary_with_uppercase_banned)
+    assert is_low_quality, "Should detect banned phrase regardless of case"
+    assert "filler:banned_phrase" in reason, f"Expected 'filler:banned_phrase' in reason, got: {reason}"
+    print(f"  [PASS] Detected: {reason}")
+
+
+def test_section_level_repetition():
+    """Test detection of 2+ identical bullets within same section."""
+    print("\n[TEST 11] Section-level repetition (2+ identical bullets)")
+    
+    summary_with_section_repetition = {
+        "sections": {
+            "tldr": [
+                {"text": "Fed raised rates 25bps citing persistent inflation above 3% target"},
+                {"text": "European energy crisis intensified as Russian gas flows dropped"},
+                {"text": "China manufacturing PMI beat expectations"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected"},
+                {"text": "Watch for volatility around key support levels"},
+                {"text": "Watch for volatility around key support levels"}  # Duplicate in same section
+            ],
+            "forward_watch": [
+                {"text": "EU energy ministers meeting Thursday to discuss price caps"},
+                {"text": "Russian gas flows via Nord Stream 1 - currently at 20% capacity"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(summary_with_section_repetition)
+    assert is_low_quality, "Should detect section-level repetition"
+    assert "filler:repeated_bullets" in reason, f"Expected 'filler:repeated_bullets' in reason, got: {reason}"
+    assert "what_occurred" in reason, f"Expected section name in reason, got: {reason}"
+    print(f"  [PASS] Detected: {reason}")
+
+
+def test_section_level_repetition_multiple_sections():
+    """Test detection of repetition across multiple sections."""
+    print("\n[TEST 12] Section-level repetition in multiple sections")
+    
+    summary_with_multiple_repetitions = {
+        "sections": {
+            "tldr": [
+                {"text": "Monitor key developments closely"},
+                {"text": "Monitor key developments closely"},  # Duplicate
+                {"text": "China manufacturing PMI beat expectations"}
+            ],
+            "what_occurred": [
+                {"text": "US PCE inflation printed 3.2% YoY vs 3.0% expected"},
+                {"text": "European natural gas TTF futures surged on supply concerns"},
+                {"text": "German manufacturing PMI contracted to 48.2 vs 49.0 expected"}
+            ],
+            "forward_watch": [
+                {"text": "EU energy ministers meeting Thursday"},
+                {"text": "Russian gas flows monitoring continues"},
+                {"text": "Fed minutes release next week"}
+            ],
+            "trade_ideas": [],
+            "warnings": [],
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": []
+        }
+    }
+    
+    is_low_quality, reason = is_low_quality_summary(summary_with_multiple_repetitions)
+    assert is_low_quality, "Should detect repetition in any section"
+    assert "filler:repeated_bullets" in reason, f"Expected 'filler:repeated_bullets' in reason, got: {reason}"
+    print(f"  [PASS] Detected: {reason}")
+
+
 def run_all_tests():
     """Run all quality gate tests."""
     print("=" * 80)
@@ -288,6 +466,11 @@ def run_all_tests():
     test_valid_summary_passes()
     test_neutral_trade_ideas_allowed()
     test_completely_empty_summary()
+    test_banned_phrase_market_data_pending()
+    test_banned_phrase_monitor_key_levels()
+    test_banned_phrase_case_insensitive()
+    test_section_level_repetition()
+    test_section_level_repetition_multiple_sections()
     
     print("\n" + "=" * 80)
     print("ALL TESTS PASSED")

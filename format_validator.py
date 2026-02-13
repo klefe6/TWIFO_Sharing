@@ -45,26 +45,27 @@ def validate_article_summary(summary: dict) -> Tuple[bool, List[str]]:
     sections = summary.get("sections", {})
     meta = summary.get("meta", {})
     
-    # Check required sections exist
-    required_sections = ["tldr", "what_occurred", "forward_watch"]
-    for sec in required_sections:
-        if sec not in sections or not sections[sec]:
-            violations.append(f"Missing or empty section: {sec}")
+    # Check required keys exist (tldr must be non-empty; others may be [])
+    if "tldr" not in sections or not sections["tldr"]:
+        violations.append("Missing or empty section: tldr")
+    for sec in ["what_occurred", "forward_watch"]:
+        if sec not in sections:
+            violations.append(f"Missing section key: {sec}")
     
     # Check TL;DR count
     tldr = sections.get("tldr", [])
     if len(tldr) > 5:
         violations.append(f"TL;DR has {len(tldr)} bullets, max is 5")
     
-    # Check KEY DATA count (what_occurred)
+    # Check KEY DATA count (upper bound only — [] is valid)
     key_data = sections.get("what_occurred", [])
-    if len(key_data) < 3 or len(key_data) > 8:
-        violations.append(f"KEY DATA has {len(key_data)} bullets, need 3-8")
+    if len(key_data) > 8:
+        violations.append(f"KEY DATA has {len(key_data)} bullets, max is 8")
     
-    # Check FORWARD WATCH count
+    # Check FORWARD WATCH count (upper bound only — [] is valid)
     forward_watch = sections.get("forward_watch", [])
-    if len(forward_watch) < 3 or len(forward_watch) > 8:
-        violations.append(f"FORWARD WATCH has {len(forward_watch)} bullets, need 3-8")
+    if len(forward_watch) > 8:
+        violations.append(f"FORWARD WATCH has {len(forward_watch)} bullets, max is 8")
     
     # Check ACTIONABLE formatting
     trade_ideas = sections.get("trade_ideas", [])
@@ -275,6 +276,9 @@ def fix_summary_format(summary: dict) -> dict:
     """
     Auto-fix summary to conform to Egypt-format.
     Modifies summary dict in-place and returns it.
+    
+    CRITICAL: Does NOT fabricate bullets to meet minimums.
+    Empty sections remain empty ([]).
     """
     sections = summary.get("sections", {})
     meta = summary.get("meta", {})
@@ -291,31 +295,31 @@ def fix_summary_format(summary: dict) -> dict:
         if len(words) > 22:
             meta["theme"] = " ".join(words[:22])
     
-    # Trim TL;DR to 5 max
+    # Trim TL;DR to 5 max (never add bullets, only trim)
     tldr = sections.get("tldr", [])
     if len(tldr) > 5:
         sections["tldr"] = tldr[:5]
     
-    # Ensure KEY DATA (what_occurred) is 3-8 bullets
+    # Ensure KEY DATA (what_occurred) exists as list, trim if too long
+    # DO NOT add bullets if missing
     key_data = sections.get("what_occurred", [])
-    if len(key_data) < 3:
-        # Pad with generic bullets if needed
-        while len(key_data) < 3:
-            key_data.append({"text": "Market data pending analysis", "sources": [meta.get("provider", "O")]})
+    if not isinstance(key_data, list):
+        key_data = []
     if len(key_data) > 8:
         key_data = key_data[:8]
     sections["what_occurred"] = key_data
     
-    # Ensure FORWARD WATCH is 3-8 bullets
+    # Ensure FORWARD WATCH exists as list, trim if too long
+    # DO NOT add bullets if missing
     forward_watch = sections.get("forward_watch", [])
-    if len(forward_watch) < 3:
-        while len(forward_watch) < 3:
-            forward_watch.append({"text": "Monitor key levels and data releases", "sources": [meta.get("provider", "O")]})
+    if not isinstance(forward_watch, list):
+        forward_watch = []
     if len(forward_watch) > 8:
         forward_watch = forward_watch[:8]
     sections["forward_watch"] = forward_watch
     
-    # Fix ACTIONABLE bullets
+    # Fix ACTIONABLE bullets ONLY if they exist and have formatting issues
+    # DO NOT create trade_ideas if missing
     trade_ideas = sections.get("trade_ideas", [])
     if trade_ideas:
         # Check if they need rewriting
@@ -328,13 +332,23 @@ def fix_summary_format(summary: dict) -> dict:
         
         if needs_rewrite and OPENAI_API_KEY:
             rewritten = rewrite_actionable_bullets(trade_ideas)
-            sections["trade_ideas"] = [{"text": t, "sources": [meta.get("provider", "O")]} for t in rewritten]
+            if rewritten:  # Only update if rewrite succeeded
+                sections["trade_ideas"] = [{"text": t, "sources": [meta.get("provider", "O")]} for t in rewritten]
     
-    # Ensure TIPS & REMINDERS is 2-6 bullets
+    # Ensure TIPS & REMINDERS exists as list, trim if too long
+    # DO NOT add bullets if missing
     tips = sections.get("tips_reminders", [])
+    if not isinstance(tips, list):
+        tips = []
     if len(tips) > 6:
         tips = tips[:6]
     sections["tips_reminders"] = tips
+    
+    # Ensure all optional sections exist as empty lists if missing
+    # (for schema consistency, but don't populate them)
+    for optional_section in ["warnings", "cross_asset_impacts", "scenarios"]:
+        if optional_section not in sections:
+            sections[optional_section] = []
     
     # Remove unwanted fields
     if "overall_bias" in meta:

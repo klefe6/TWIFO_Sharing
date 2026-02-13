@@ -90,6 +90,35 @@ def get_bias_color(bias: str) -> colors.Color:
     return BIAS_COLORS.get(bias_lower, BIAS_COLORS['neutral'])
 
 
+# Reason-specific messages for LOW CONFIDENCE banner (meta.low_confidence_reason)
+LOW_CONFIDENCE_MESSAGES = {
+    "degraded_extraction": (
+        "This summary was generated from degraded text extraction. "
+        "Content may be incomplete or less accurate than typical summaries."
+    ),
+    "unverified_numerics": (
+        "Some numeric claims could not be verified against the source. "
+        "Content may be incomplete or less accurate than typical summaries."
+    ),
+    "ocr_fallback": (
+        "This summary was generated from OCR fallback. "
+        "Text recognition may contain errors; content may be incomplete or less accurate."
+    ),
+}
+
+
+def get_low_confidence_banner_message(meta: dict) -> str:
+    """Return reason-specific banner message from meta.low_confidence_reason; default if unknown."""
+    reason = (meta.get("low_confidence_reason") or "").strip()
+    # Use first segment when reason is compound (e.g. "degraded_extraction; unverified_numerics")
+    primary = reason.split(";")[0].strip().lower() if reason else ""
+    return LOW_CONFIDENCE_MESSAGES.get(
+        primary,
+        "This summary was generated with low confidence. "
+        "Content may be incomplete or less accurate than typical summaries.",
+    )
+
+
 def add_page_background_and_footer(canv, doc):
     """Callback to add background and footer to each page."""
     # Draw background
@@ -588,8 +617,10 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
         output_path = json_path.parent / f"{json_path.stem}.pdf"
     
     # Check if extraction failed - render failure page instead
+    # Allow "ok" and "degraded" (degraded gets a warning banner but still renders)
     extraction = summary.get("extraction", {})
-    if extraction.get("status") != "ok":
+    extraction_status = extraction.get("status", "unknown")
+    if extraction_status not in ("ok", "degraded"):
         return _render_failed_summary_pdf(output_path, summary)
     
     try:
@@ -698,6 +729,39 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
             story.append(Paragraph(products_text, products_style))
         
         story.append(Spacer(1, 0.1*inch))
+        
+        # Warning banner for degraded/low-confidence extractions
+        is_low_confidence = meta.get("low_confidence", False)
+        extraction_status = extraction.get("status", "ok")
+        
+        if is_low_confidence or extraction_status == "degraded":
+            banner_msg = get_low_confidence_banner_message(meta)
+            warning_data = [[
+                Paragraph(
+                    "<b>⚠️ LOW CONFIDENCE</b><br/>" + banner_msg,
+                    ParagraphStyle(
+                        'WarningText',
+                        fontSize=9,
+                        textColor=colors.HexColor('#856404'),
+                        alignment=TA_LEFT,
+                        leading=11
+                    )
+                )
+            ]]
+            
+            warning_table = Table(warning_data, colWidths=[6.5*inch])
+            warning_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FFF3CD')),
+                ('BOX', (0, 0), (-1, -1), 2, colors.HexColor('#FFC107')),
+                ('LEFTPADDING', (0, 0), (-1, -1), 10),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                ('TOPPADDING', (0, 0), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ]))
+            
+            story.append(Spacer(1, 0.1*inch))
+            story.append(warning_table)
+            story.append(Spacer(1, 0.15*inch))
         
         # =========================
         # EGYPT-FORMAT BODY SECTIONS
@@ -831,6 +895,52 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
                 text = tip.get("text", "") if isinstance(tip, dict) else str(tip)
                 if text:
                     story.append(Paragraph(f"• {text}", bullet_style))
+            
+            story.append(Spacer(1, 0.1*inch))
+        
+        # =========================
+        # CHART OBSERVATIONS (v1.2)
+        # =========================
+        chart_observations = summary.get("chart_observations", [])
+        chart_score_val = summary.get("chart_score_0_3", 0)
+        if chart_observations and chart_score_val > 0:
+            story.append(Paragraph(f"CHART OBSERVATIONS (chart score: {chart_score_val}/3)", section_header_style))
+            
+            for obs in chart_observations:
+                text = obs.get("text", "") if isinstance(obs, dict) else str(obs)
+                if text:
+                    story.append(Paragraph(f"• {text}", bullet_style))
+            
+            story.append(Spacer(1, 0.1*inch))
+        
+        # =========================
+        # FINGERPRINT QUOTES (v1.2)
+        # =========================
+        fingerprint_quotes = summary.get("fingerprint_quotes", [])
+        if fingerprint_quotes:
+            fp_style = ParagraphStyle(
+                'FingerprintQuote',
+                fontSize=8,
+                textColor=colors.HexColor('#666666'),
+                fontName='Helvetica-Oblique',
+                leftIndent=12,
+                spaceAfter=3,
+                leading=10
+            )
+            fp_header_style = ParagraphStyle(
+                'FingerprintHeader',
+                fontSize=8,
+                textColor=colors.HexColor('#999999'),
+                fontName='Helvetica',
+                spaceAfter=4,
+                spaceBefore=8,
+                leading=10
+            )
+            story.append(Paragraph("SOURCE FINGERPRINTS", fp_header_style))
+            for quote in fingerprint_quotes:
+                if isinstance(quote, str) and quote.strip():
+                    escaped = quote.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    story.append(Paragraph(f'"{escaped}"', fp_style))
             
             story.append(Spacer(1, 0.1*inch))
         
@@ -991,9 +1101,11 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("What Occurred", section_header_style))
                 
-                # Sort products alphabetically, but put "Other" last
-                sorted_products = sorted([p for p in observations.keys() if p != "Other"])
-                if "Other" in observations:
+                # Sort products alphabetically, put General last
+                sorted_products = sorted([p for p in observations.keys() if p != "General" and p != "Other"])
+                if "General" in observations:
+                    sorted_products.append("General")
+                elif "Other" in observations:
                     sorted_products.append("Other")
                 
                 for product in sorted_products:
@@ -1154,9 +1266,11 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("🔭 Forward Watch", section_header_style))
                 
-                # Sort products alphabetically, but put "Other" last
-                sorted_products = sorted([p for p in forward_watch.keys() if p != "Other"])
-                if "Other" in forward_watch:
+                # Sort products alphabetically, put General last
+                sorted_products = sorted([p for p in forward_watch.keys() if p != "General" and p != "Other"])
+                if "General" in forward_watch:
+                    sorted_products.append("General")
+                elif "Other" in forward_watch:
                     sorted_products.append("Other")
                 
                 for product in sorted_products:

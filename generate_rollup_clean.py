@@ -1,8 +1,9 @@
 """
 Rollup Generator (Wrapper)
 Purpose: Generate daily and weekly rollups from article summaries using rollups.py
+         Supports both deterministic aggregation (default) and LLM-powered aggregation (--llm).
 Author: Kevin Lefebvre
-Last Updated: 2026-01-11
+Last Updated: 2026-02-12
 ZERO-OCR RULE: This module NEVER touches PDFs or uses OCR
 """
 
@@ -15,11 +16,14 @@ from datetime import datetime, date, timedelta
 from typing import Optional, Dict, List
 from collections import defaultdict
 
-# Import the core rollup builder
+# Import the core rollup builder (deterministic path)
 from rollups import (
     build_daily_rollup, build_weekly_rollup, write_json, write_txt, render_rollup_txt,
     load_json as rollup_load_json
 )
+
+# Import the LLM-powered aggregator
+from rollup_aggregator import aggregate_rollup, validate_rollup_schema
 
 # Configuration
 FILES_DIR = Path(r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE")
@@ -174,9 +178,17 @@ def _convert_legacy_schema(legacy_summary: dict, filename: str) -> dict:
         }
     }
 
-def generate_daily_rollup(target_date: date, min_articles: int = 1) -> Optional[Dict]:
+def generate_daily_rollup(
+    target_date: date, min_articles: int = 1, *, use_llm: bool = False
+) -> Optional[Dict]:
     """
-    Generate daily rollup JSON for a specific date using rollups.py module.
+    Generate daily rollup JSON for a specific date.
+
+    Args:
+        target_date: Date to generate rollup for.
+        min_articles: Minimum articles required.
+        use_llm: If True, use LLM-powered aggregator instead of deterministic.
+
     ZERO-OCR RULE: Only reads from existing __sum.json files, never touches PDFs.
     """
     article_jsons = collect_daily_articles(target_date, min_articles)
@@ -185,12 +197,41 @@ def generate_daily_rollup(target_date: date, min_articles: int = 1) -> Optional[
         print(f"[INFO] Not enough articles for {target_date} (need {min_articles}, found {len(article_jsons)})")
         return None
     
-    # Use rollups.py to build the rollup
+    if use_llm:
+        return _generate_llm_rollup(
+            article_jsons, rollup_kind="daily",
+            target_date=target_date.isoformat(),
+        )
+
+    # Deterministic path via rollups.py
     try:
         rollup = build_daily_rollup(target_date, article_jsons, min_articles_required=min_articles)
         return rollup
     except ValueError as e:
         print(f"[ERROR] Failed to build rollup: {e}")
+        return None
+
+
+def _generate_llm_rollup(
+    article_jsons: List[Dict],
+    rollup_kind: str = "daily",
+    target_date: Optional[str] = None,
+) -> Optional[Dict]:
+    """
+    Generate a rollup using the LLM-powered aggregator.
+    Feeds only validated sum.json objects (not raw PDFs).
+    """
+    try:
+        rollup, violations = aggregate_rollup(
+            article_jsons,
+            rollup_kind=rollup_kind,
+            target_date=target_date,
+        )
+        if violations:
+            print(f"[WARN] LLM rollup has {len(violations)} schema violations (still usable)")
+        return rollup
+    except Exception as e:
+        print(f"[ERROR] LLM rollup generation failed: {e}")
         return None
 
 def save_daily_rollup(rollup: Dict, target_date: date, generate_pdf: bool = True) -> Path:
@@ -226,14 +267,16 @@ def save_daily_rollup(rollup: Dict, target_date: date, generate_pdf: bool = True
     
     return json_path
 
-def generate_weekly_rollup(start_date: date, end_date: date, min_articles: int = 3) -> Optional[Dict]:
+def generate_weekly_rollup(
+    start_date: date, end_date: date, min_articles: int = 3, *, use_llm: bool = False
+) -> Optional[Dict]:
     """Generate weekly rollup JSON for a date range."""
     # Collect all articles in range
     all_article_jsons = []
     current_date = start_date
     
     while current_date <= end_date:
-        articles = collect_daily_articles(current_date, min_articles=1)  # Lower threshold for weekly
+        articles = collect_daily_articles(current_date, min_articles=1)
         all_article_jsons.extend(articles)
         current_date += timedelta(days=1)
     
@@ -241,7 +284,13 @@ def generate_weekly_rollup(start_date: date, end_date: date, min_articles: int =
         print(f"[INFO] Not enough articles for week {start_date} to {end_date} (need {min_articles}, found {len(all_article_jsons)})")
         return None
     
-    # Use rollups.py to build the weekly rollup
+    if use_llm:
+        return _generate_llm_rollup(
+            all_article_jsons, rollup_kind="weekly",
+            target_date=start_date.isoformat(),
+        )
+
+    # Deterministic path via rollups.py
     try:
         rollup = build_weekly_rollup(start_date, end_date, all_article_jsons, min_articles_required=min_articles)
         return rollup
@@ -284,61 +333,61 @@ def save_weekly_rollup(rollup: Dict, start_date: date, end_date: date, generate_
     
     return json_path
 
+def _parse_date_arg(date_str: str) -> date:
+    """Parse a date argument in YYYYMMDD or YYYY-MM-DD format."""
+    if len(date_str) == 8 and date_str.isdigit():
+        return datetime.strptime(date_str, "%Y%m%d").date()
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
 def main():
     """Main entry point for rollup generation."""
     import sys
     
-    if len(sys.argv) < 2:
+    # Check for --llm flag anywhere in args
+    use_llm = "--llm" in sys.argv
+    args = [a for a in sys.argv if a != "--llm"]
+
+    if len(args) < 2:
         print("Usage:")
-        print("  python generate_rollup_clean.py daily YYYY-MM-DD (or YYYYMMDD)")
-        print("  python generate_rollup_clean.py daily-range YYYY-MM-DD YYYY-MM-DD  # Generate for date range")
-        print("  python generate_rollup_clean.py weekly YYYY-MM-DD [YYYY-MM-DD] (or YYYYMMDD)")
-        print("  python generate_rollup_clean.py daily-all  # Generate for all dates with articles")
-        print("  python generate_rollup_clean.py weekly-all # Generate for all weeks with articles")
+        print("  python generate_rollup_clean.py daily YYYY-MM-DD [--llm]")
+        print("  python generate_rollup_clean.py daily-range YYYY-MM-DD YYYY-MM-DD [--llm]")
+        print("  python generate_rollup_clean.py weekly YYYY-MM-DD [YYYY-MM-DD] [--llm]")
+        print("  python generate_rollup_clean.py daily-all [--llm]")
+        print("  python generate_rollup_clean.py weekly-all [--llm]")
+        print()
+        print("Flags:")
+        print("  --llm   Use LLM-powered aggregator (consensus/divergence/catalysts)")
+        print("          Default: deterministic aggregation via rollups.py")
         return
     
-    command = sys.argv[1].lower()
-    
+    command = args[1].lower()
+    mode_label = "LLM-powered" if use_llm else "deterministic"
+    print(f"[MODE] {mode_label} rollup generation")
+
     if command == "daily":
-        if len(sys.argv) < 3:
+        if len(args) < 3:
             print("[ERROR] Please provide date: YYYY-MM-DD or YYYYMMDD")
             return
         
         try:
-            date_str = sys.argv[2]
-            # Try YYYYMMDD format first (e.g., 20260108)
-            if len(date_str) == 8 and date_str.isdigit():
-                target_date = datetime.strptime(date_str, "%Y%m%d").date()
-            else:
-                # Try YYYY-MM-DD format (e.g., 2026-01-08)
-                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            target_date = _parse_date_arg(args[2])
         except ValueError:
             print("[ERROR] Invalid date format. Use YYYY-MM-DD or YYYYMMDD")
             return
         
-        rollup = generate_daily_rollup(target_date)
+        rollup = generate_daily_rollup(target_date, use_llm=use_llm)
         if rollup:
             save_daily_rollup(rollup, target_date)
     
     elif command == "daily-range":
-        if len(sys.argv) < 4:
-            print("[ERROR] Please provide start and end dates: YYYY-MM-DD YYYY-MM-DD (or YYYYMMDD)")
+        if len(args) < 4:
+            print("[ERROR] Please provide start and end dates: YYYY-MM-DD YYYY-MM-DD")
             return
         
         try:
-            start_str = sys.argv[2]
-            end_str = sys.argv[3]
-            
-            # Try YYYYMMDD format first
-            if len(start_str) == 8 and start_str.isdigit():
-                start_date = datetime.strptime(start_str, "%Y%m%d").date()
-            else:
-                start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-            
-            if len(end_str) == 8 and end_str.isdigit():
-                end_date = datetime.strptime(end_str, "%Y%m%d").date()
-            else:
-                end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+            start_date = _parse_date_arg(args[2])
+            end_date = _parse_date_arg(args[3])
         except ValueError:
             print("[ERROR] Invalid date format. Use YYYY-MM-DD or YYYYMMDD")
             return
@@ -347,7 +396,6 @@ def main():
             print("[ERROR] End date must be after start date")
             return
         
-        # Process each date in the range
         current_date = start_date
         generated = 0
         skipped = 0
@@ -357,84 +405,70 @@ def main():
         print()
         
         while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            print(f"[INFO] Processing {date_str}...")
+            date_label = current_date.strftime("%Y-%m-%d")
+            print(f"[INFO] Processing {date_label}...")
             
-            rollup = generate_daily_rollup(current_date, min_articles=1)
+            rollup = generate_daily_rollup(current_date, min_articles=1, use_llm=use_llm)
             if rollup:
                 try:
                     save_daily_rollup(rollup, current_date)
                     generated += 1
-                    print(f"[OK] {date_str}: Generated successfully\n")
+                    print(f"[OK] {date_label}: Generated successfully\n")
                 except Exception as e:
-                    print(f"[ERROR] {date_str}: Failed to save - {e}\n")
+                    print(f"[ERROR] {date_label}: Failed to save - {e}\n")
                     failed += 1
             else:
                 skipped += 1
-                print(f"[SKIP] {date_str}: Not enough articles or generation failed\n")
+                print(f"[SKIP] {date_label}: Not enough articles or generation failed\n")
             
             current_date += timedelta(days=1)
         
         print(f"[SUMMARY] Generated: {generated}, Skipped: {skipped}, Failed: {failed}")
     
     elif command == "weekly":
-        if len(sys.argv) < 3:
+        if len(args) < 3:
             print("[ERROR] Please provide start date: YYYY-MM-DD or YYYYMMDD")
             return
         
         try:
-            start_str = sys.argv[2]
-            # Try YYYYMMDD format first
-            if len(start_str) == 8 and start_str.isdigit():
-                start_date = datetime.strptime(start_str, "%Y%m%d").date()
+            start_date = _parse_date_arg(args[2])
+            if len(args) >= 4:
+                end_date = _parse_date_arg(args[3])
             else:
-                start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-            
-            if len(sys.argv) >= 4:
-                end_str = sys.argv[3]
-                # Try YYYYMMDD format first
-                if len(end_str) == 8 and end_str.isdigit():
-                    end_date = datetime.strptime(end_str, "%Y%m%d").date()
-                else:
-                    end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
-            else:
-                # Default to start_date + 6 days (7 days total: selected date through selected date + 6)
                 end_date = start_date + timedelta(days=6)
         except ValueError:
             print("[ERROR] Invalid date format. Use YYYY-MM-DD or YYYYMMDD")
             return
         
-        rollup = generate_weekly_rollup(start_date, end_date)
+        rollup = generate_weekly_rollup(start_date, end_date, use_llm=use_llm)
         if rollup:
             save_weekly_rollup(rollup, start_date, end_date)
     
     elif command == "daily-all":
-        # Find all unique dates with summaries
         dates = set()
         for json_file in FILES_DIR.glob("*__sum.json"):
-            date_str = extract_date_from_filename(json_file.name)
-            if date_str:
-                dates.add(parse_date_yyyymmdd(date_str))
+            ds = extract_date_from_filename(json_file.name)
+            if ds:
+                dates.add(parse_date_yyyymmdd(ds))
         
         for target_date in sorted(dates, reverse=True):
-            rollup = generate_daily_rollup(target_date)
+            rollup = generate_daily_rollup(target_date, use_llm=use_llm)
             if rollup:
                 save_daily_rollup(rollup, target_date)
     
     elif command == "weekly-all":
-        # Group dates by ISO week
-        week_groups = defaultdict(list)
+        week_groups: Dict[tuple, list] = defaultdict(list)
         for json_file in FILES_DIR.glob("*__sum.json"):
-            date_str = extract_date_from_filename(json_file.name)
-            if date_str:
-                d = parse_date_yyyymmdd(date_str)
+            ds = extract_date_from_filename(json_file.name)
+            if ds:
+                d = parse_date_yyyymmdd(ds)
                 year, week = get_iso_week(d)
                 week_groups[(year, week)].append(d)
         
-        for (year, week), dates in week_groups.items():
-            start_date = min(dates)
-            end_date = max(dates)
-            rollup = generate_weekly_rollup(start_date, end_date)
+        for (year, week), week_dates in week_groups.items():
+            start_date = min(week_dates)
+            end_date = max(week_dates)
+            rollup = generate_weekly_rollup(start_date, end_date, use_llm=use_llm)
             if rollup:
                 save_weekly_rollup(rollup, start_date, end_date)
     

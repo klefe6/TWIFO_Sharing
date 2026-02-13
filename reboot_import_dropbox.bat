@@ -5,9 +5,9 @@ REM Launches import_dropbox.py using Streamlit from within TWIFO_Sharing's .venv
 REM Must be run from the folder where this .bat lives.
 REM ─────────────────────────────────────────────────────────────────────────────
 
-REM ─── Configuration ─────────────────────────────────────────────
-REM Use TWIFO_Sharing's own venv instead of HomePage's venv
-set "PROJECT_ROOT=C:\Program Files\Coding Projects\TWIFO_Sharing"
+REM ─── Switch to TWIFO_Sharing folder first (so paths are correct) ─
+cd /d "%~dp0"
+set "PROJECT_ROOT=%CD%"
 set "VENV=%PROJECT_ROOT%\.venv13"
 set "PY=%VENV%\Scripts\python.exe"
 set "STREAMLIT=%VENV%\Scripts\streamlit.exe"
@@ -26,9 +26,6 @@ if not exist "%STREAMLIT%" (
   pause
   exit /b 1
 )
-
-REM ─── Switch to TWIFO_Sharing folder ───────────────────────────
-cd /d "%~dp0"
 
 REM ─── Launch via Streamlit using venv's python ─────────────────
 REM Using FIXED port 8001 (no auto-increment)

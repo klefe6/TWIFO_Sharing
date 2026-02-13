@@ -2,10 +2,10 @@
 Test: Rollup No-Hallucination Validation
 Purpose: Verify rollups only include exact strings from article summaries (no invented levels)
 Author: Kevin Lefebvre
-Last Updated: 2026-01-26
+Last Updated: 2026-02-04
 """
 
-import json
+import re
 from pathlib import Path
 from datetime import date
 from rollups import build_daily_rollup
@@ -116,6 +116,9 @@ def test_rollup_no_hallucinated_levels():
         }
     }
     
+    # Add model to one article so meta.model is derived (not "aggregated")
+    article1["meta"]["model"] = "gpt-4o-mini"
+
     # Build rollup
     test_date = date(2026, 1, 26)
     rollup = build_daily_rollup(test_date, [article1, article2], min_articles_required=1)
@@ -132,6 +135,20 @@ def test_rollup_no_hallucinated_levels():
     expected_products = {"ES", "NQ", "GC", "ZN", "BTC"}
     assert products_in_rollup == expected_products, f"Missing products: {expected_products - products_in_rollup}"
     print("[PASS] Test 1: All products present in rollup")
+
+    # Test 1b: meta.generated_at_iso must be timezone-aware (ends with Z or +/-HH:MM)
+    generated_at = rollup.get("meta", {}).get("generated_at_iso", "")
+    assert generated_at, "meta.generated_at_iso must be set"
+    assert (
+        generated_at.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", generated_at)
+    ), f"generated_at_iso must be timezone-aware (end with Z or +/-HH:MM): got {generated_at}"
+    print(f"[PASS] Test 1b: generated_at_iso is timezone-aware: {generated_at}")
+
+    # Test 1c: meta.model must be non-empty string (never null)
+    model = rollup.get("meta", {}).get("model")
+    assert model is not None, "meta.model must not be null"
+    assert isinstance(model, str) and model.strip(), f"meta.model must be non-empty string: got {model!r}"
+    print(f"[PASS] Test 1c: meta.model is non-empty: {model}")
     
     # Test 2: Verify global product ordering (Indices -> Rates -> Metals -> Crypto)
     product_order = [t["product"] for t in trade_ideas]
@@ -209,6 +226,17 @@ def test_rollup_no_hallucinated_levels():
     except ValueError as e:
         assert "Not enough articles" in str(e)
         print("[PASS] Test 6: Fail-closed behavior correct (rejects empty input)")
+
+    # Test 6b: When articles have no model, meta.model falls back to "aggregated"
+    article_no_model = {
+        "schema_version": "twifo.sum.v1",
+        "kind": "article",
+        "meta": {"provider": "X", "title": "No Model", "products": []},
+        "sections": {"trade_ideas": [], "tldr": [], "what_occurred": [], "forward_watch": []},
+    }
+    rollup_no_model = build_daily_rollup(test_date, [article_no_model], min_articles_required=1)
+    assert rollup_no_model["meta"]["model"] == "aggregated", f"Expected 'aggregated', got {rollup_no_model['meta']['model']}"
+    print("[PASS] Test 6b: meta.model fallback to 'aggregated' when articles have no model")
     
     # Test 7: Print full rollup for manual inspection
     print("\n" + "-"*80)

@@ -8,6 +8,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from typing import Optional, List, Dict
 
+# Import path manager for new file layout
+try:
+    from path_manager import TWIFOPathManager, get_path_manager
+    PATH_MANAGER_AVAILABLE = True
+except ImportError:
+    PATH_MANAGER_AVAILABLE = False
+    TWIFOPathManager = None
+    get_path_manager = None
+
+# Import summary view renderer
+try:
+    from summary_view import load_summary_json, is_stub_summary, render_failed_summary, render_summary_view
+    SUMMARY_VIEW_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Summary view not available: {e}")
+    SUMMARY_VIEW_AVAILABLE = False
+    load_summary_json = None
+    is_stub_summary = None
+    render_failed_summary = None
+    render_summary_view = None
+
+# Import daily view helper
+try:
+    from twifo_app import get_yesterday_artifacts
+    DAILY_VIEW_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Daily view helper not available: {e}")
+    DAILY_VIEW_AVAILABLE = False
+    get_yesterday_artifacts = None
+
 # compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
 
@@ -94,6 +124,130 @@ def detect_category(fname: str) -> str:
     return "Others"
 
 
+def parse_pdf_filename(fname: str) -> dict:
+    """
+    Parse PDF filename in both old and new formats.
+    
+    Old format: PREFIX_title_YYYYMMDD_f.pdf
+        Example: BOA_Market_Update_20260212_w.pdf
+    
+    New format: YYYYMMDD__PROVIDER__title_slug__docid.pdf
+        Example: 20260212__BOA__market-update__abc123.pdf
+    
+    Returns:
+        dict with keys: provider, title_str, date_fmt, frequency, horizon_code, basename
+    """
+    basename = os.path.splitext(fname)[0]
+    
+    # Detect format by checking for double underscores (new format)
+    if '__' in fname:
+        # New deterministic format: YYYYMMDD__PROVIDER__title_slug__docid.pdf
+        parts = basename.split('__')
+        
+        if len(parts) >= 3:
+            date_part = parts[0]  # First 8 digits
+            provider_code = parts[1]  # PROVIDER between first and second __
+            title_slug = parts[2] if len(parts) > 2 else ""  # Title slug
+            
+            # Map provider code to full name
+            provider = PREFIX_MAP.get(f"{provider_code}_", provider_code)
+            
+            # Convert title_slug to human-readable (replace hyphens/underscores with spaces)
+            title_str = title_slug.replace('-', ' ').replace('_', ' ').strip()
+            
+            # No frequency in new format, default to 'u' (unknown/unspecified)
+            horizon_code = 'u'
+            frequency = ''
+            
+            # Parse date
+            dt = None
+            try:
+                dt = datetime.datetime.strptime(date_part, "%Y%m%d")
+            except ValueError:
+                try:
+                    dt = datetime.datetime.strptime(date_part, "%Y-%m-%d")
+                except ValueError:
+                    try:
+                        dt = datetime.datetime.strptime(date_part, "%Y_%m_%d")
+                    except ValueError:
+                        pass
+            
+            if dt:
+                date_fmt = dt.strftime("%Y-%m-%d")
+                is_today = (dt.date() == datetime.date.today())
+            else:
+                date_fmt = "Unknown"
+                is_today = False
+            
+            return {
+                'provider': provider,
+                'title_str': title_str,
+                'date_fmt': date_fmt,
+                'frequency': frequency,
+                'horizon_code': horizon_code,
+                'basename': basename,
+                'is_today': is_today
+            }
+    
+    # Old format: PREFIX_title_YYYYMMDD_f.pdf
+    parts = basename.split("_")
+    
+    if len(parts) >= 4:
+        # PREFIX_title_words_YYYYMMDD_f
+        prefix = parts[0]
+        *title_parts, date_part, fcode = parts[1:]
+        title_str = " ".join(title_parts)
+    elif len(parts) == 3:
+        # PREFIX_title_YYYYMMDD
+        prefix = parts[0]
+        title_str = parts[1]
+        date_part = parts[2]
+        fcode = "u"
+    else:
+        # Fallback for malformed filenames
+        prefix = parts[0] if len(parts) > 0 else ""
+        title_str = "_".join(parts[1:]) if len(parts) > 1 else fname
+        date_part = ""
+        fcode = "u"
+    
+    # Detect provider from prefix
+    provider = PREFIX_MAP.get(f"{prefix}_", "Others")
+    
+    # Parse date
+    dt = None
+    try:
+        dt = datetime.datetime.strptime(date_part, "%Y%m%d")
+    except ValueError:
+        try:
+            dt = datetime.datetime.strptime(date_part, "%Y-%m-%d")
+        except ValueError:
+            try:
+                dt = datetime.datetime.strptime(date_part, "%Y_%m_%d")
+            except ValueError:
+                pass
+    
+    if dt:
+        date_fmt = dt.strftime("%Y-%m-%d")
+        is_today = (dt.date() == datetime.date.today())
+    else:
+        date_fmt = "Unknown"
+        is_today = False
+    
+    # Map frequency
+    fmap = {"y": "Yearly", "q": "Quarterly", "m": "Monthly", "w": "Weekly", "u": ""}
+    frequency = fmap.get(fcode.lower(), "unknown")
+    
+    return {
+        'provider': provider,
+        'title_str': title_str,
+        'date_fmt': date_fmt,
+        'frequency': frequency,
+        'horizon_code': fcode.lower(),
+        'basename': basename,
+        'is_today': is_today
+    }
+
+
 def detect_products(text: str) -> list[str]:
     """Return list of product codes found in text (case-insensitive)."""
     import re
@@ -116,6 +270,16 @@ FILES_DIR = os.path.normpath(
     r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE"
 )
 
+# Initialize path manager for new file layout
+if PATH_MANAGER_AVAILABLE:
+    PATH_MANAGER = get_path_manager(Path(FILES_DIR))
+    print(f"[INIT] Path manager initialized")
+    print(f"  Originals: {PATH_MANAGER.originals_dir}")
+    print(f"  Artifacts: {PATH_MANAGER.artifacts_dir}")
+else:
+    PATH_MANAGER = None
+    print("[WARN] Path manager not available - using legacy layout")
+
 # PDF search cache configuration
 PDF_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".pdf_cache")
 PDF_CACHE_FILE = os.path.join(PDF_CACHE_DIR, "pdf_text_cache.json")
@@ -133,6 +297,22 @@ LOG_FILE = os.path.expanduser("~/Documents/login_log.txt")
 # Corporate colors
 HEADER_BG_COLOR   = "#004080"
 HEADER_TEXT_COLOR = "white"
+# Tab styles
+TAB_STYLE = {
+    'padding': '12px 24px',
+    'fontWeight': 'bold',
+    'borderBottom': '2px solid #ddd',
+    'backgroundColor': '#f8f9fa',
+    'color': '#495057'
+}
+
+SELECTED_TAB_STYLE = {
+    'padding': '12px 24px',
+    'fontWeight': 'bold',
+    'borderBottom': '3px solid #007BFF',
+    'backgroundColor': '#ffffff',
+    'color': '#007BFF'
+}
 ROW_ODD_COLOR     = "#f2f2f2"
 ROW_EVEN_COLOR    = "white"
 APP_BG_COLOR      = "#f7f9fa"
@@ -148,17 +328,23 @@ def get_category_options():
     categories = sorted(set(PREFIX_MAP.values()) | {"Others"})
     counts = {cat: 0 for cat in categories}
 
-    # scan your FILES_DIR with error handling
+    # Scan both new layout (originals/) and legacy layout (root) using helper
     try:
-        if os.path.isdir(FILES_DIR):
-            for fname in os.listdir(FILES_DIR):
-                if not fname.lower().endswith(".pdf") or fname == "README.txt":
-                    continue
-                cat = detect_category(fname)
-                counts[cat] += 1
+        all_pdfs = iter_all_candidate_pdfs(FILES_DIR)
+        for fname, full_path, layout_type in all_pdfs:
+            # Parse filename to get provider
+            parsed = parse_pdf_filename(fname)
+            provider = parsed['provider'] if parsed['provider'] else "Others"
+            
+            # Increment count for this provider
+            if provider in counts:
+                counts[provider] += 1
+            else:
+                # New provider not in PREFIX_MAP - add to Others
+                counts["Others"] += 1
     except Exception as e:
         # If directory scan fails, return empty counts but still show categories
-        print(f"Warning: Could not scan FILES_DIR: {e}")
+        print(f"Warning: Could not scan for categories: {e}")
 
     return [
         {"label": f"{cat} ({counts[cat]})", "value": cat}
@@ -333,15 +519,42 @@ def has_summary_file(filepath: str) -> tuple[bool, str, str]:
     - Generate PDF from JSON if JSON exists but PDF doesn't
     
     Note: Returns just the filenames (not full paths) for URL generation.
+    
+    Checks both new layout (artifacts/<basename>/) and legacy layout (root).
+    Handles both old and new filename formats:
+    - Old: PREFIX_title_YYYYMMDD_f.pdf -> artifacts/PREFIX_title_YYYYMMDD_f/sum.json
+    - New: YYYYMMDD__PROVIDER__title__docid.pdf -> artifacts/YYYYMMDD__PROVIDER__title__docid/sum.json
     """
     if not filepath.endswith('.pdf'):
         return False, "", ""
     
-    # Build summary paths (same directory as source)
-    base_path = filepath[:-4]  # Remove .pdf extension
+    # Get basename from filepath
+    fname = os.path.basename(filepath)
+    base_name = os.path.splitext(fname)[0]
     dir_path = os.path.dirname(filepath)
-    base_name = os.path.basename(base_path)
     
+    # Try new layout first if path manager available
+    if PATH_MANAGER_AVAILABLE and PATH_MANAGER:
+        # Pattern A: Try exact basename match first (handles both old and new formats)
+        has_pdf, has_json, has_txt = PATH_MANAGER.has_summary(base_name)
+        
+        if has_pdf or has_json:
+            # Return relative paths for URL generation
+            # Format: artifacts/<basename>/sum.pdf
+            pdf_filename = f"artifacts/{base_name}/sum.pdf" if has_pdf else ""
+            json_filename = f"artifacts/{base_name}/sum.json" if has_json else ""
+            return True, pdf_filename, json_filename
+        
+        # Pattern B: For new format files, also try old-style prefix basename
+        # (safety fallback if artifacts used old naming before migration)
+        if '__' in base_name:
+            # Parse new format to construct old-style basename
+            parsed = parse_pdf_filename(fname)
+            # Try constructing old-style name: PROVIDER_title_YYYYMMDD_f
+            # (This is unlikely but kept for safety during transition)
+            pass  # Skip this pattern - artifacts should use deterministic basename
+    
+    # Fallback to legacy layout (Pattern B: root directory)
     # Check for __sum.pdf (preferred format)
     summary_pdf = os.path.join(dir_path, f"{base_name}__sum.pdf")
     pdf_filename = f"{base_name}__sum.pdf" if os.path.isfile(summary_pdf) else ""
@@ -351,7 +564,7 @@ def has_summary_file(filepath: str) -> tuple[bool, str, str]:
     json_filename = f"{base_name}__sum.json" if os.path.isfile(summary_json_new) else ""
     
     # Check for legacy .summary.json
-    summary_json_legacy = f"{base_path}.summary.json"
+    summary_json_legacy = os.path.join(dir_path, f"{base_name}.summary.json")
     if not json_filename and os.path.isfile(summary_json_legacy):
         json_filename = os.path.basename(summary_json_legacy)
     
@@ -363,6 +576,246 @@ def has_summary_file(filepath: str) -> tuple[bool, str, str]:
         return True, pdf_filename, json_filename
     
     return False, "", ""
+
+
+def iter_all_candidate_pdfs(directory: str) -> list[tuple[str, str, str]]:
+    """
+    Discover all candidate PDFs from both new and legacy layouts.
+    
+    Returns list of tuples: (filename, full_path, layout_type)
+    - Deduplicates by basename (file without extension)
+    - Prioritizes new layout (originals/) over legacy (root FILES_DIR)
+    - Excludes subdirectories in legacy scan
+    - Excludes README.txt
+    
+    Args:
+        directory: Root directory to scan (typically FILES_DIR)
+    
+    Returns:
+        List of (filename, full_path, layout_type) tuples where layout_type is 'new' or 'legacy'
+    """
+    all_pdfs = []
+    seen_basenames = set()
+    
+    # 1. Scan new layout: originals/ (via PATH_MANAGER)
+    if PATH_MANAGER_AVAILABLE and PATH_MANAGER and directory == FILES_DIR:
+        try:
+            originals = PATH_MANAGER.list_originals()
+            for fname in originals:
+                if fname.lower().endswith(".pdf") and fname != "README.txt":
+                    basename = os.path.splitext(fname)[0]
+                    if basename not in seen_basenames:
+                        full_path = str(PATH_MANAGER.original_pdf_path(fname))
+                        all_pdfs.append((fname, full_path, 'new'))
+                        seen_basenames.add(basename)
+        except Exception as e:
+            print(f"[WARN] Could not scan originals/: {e}")
+    
+    # 2. Scan legacy layout: root directory (FILES_DIR only, no subdirectories)
+    try:
+        for item in os.listdir(directory):
+            # Only process files directly in root (skip subdirectories like originals/, artifacts/, rollups/)
+            full_item_path = os.path.join(directory, item)
+            if os.path.isdir(full_item_path):
+                continue
+            
+            # Only PDFs, exclude README.txt
+            if item.lower().endswith(".pdf") and item != "README.txt":
+                basename = os.path.splitext(item)[0]
+                if basename not in seen_basenames:
+                    all_pdfs.append((item, full_item_path, 'legacy'))
+                    seen_basenames.add(basename)
+    except Exception as e:
+        print(f"[WARN] Could not scan legacy files in {directory}: {e}")
+    
+    return sorted(all_pdfs)
+
+
+def discover_from_artifacts(
+    artifacts_dir: Path,
+    files_dir: str,
+    seen_basenames: set,
+    selected: list,
+    start_date: str,
+    end_date: str,
+    tt: str
+) -> list:
+    """
+    Fallback discovery: scan artifacts/*/sum.json and build table rows from metadata.
+    
+    This ensures the app works even when:
+    - Original PDFs are missing
+    - Naming conventions don't match cleanly
+    - PDFs haven't been copied to originals/ yet
+    
+    Args:
+        artifacts_dir: Path to artifacts/ directory
+        files_dir: Root FILES_DIR for path resolution
+        seen_basenames: Set of basenames already discovered (to avoid duplicates)
+        selected: Category filter
+        start_date: Date range start (ISO format)
+        end_date: Date range end (ISO format)
+        tt: Title search term
+    
+    Returns:
+        List of candidate file dicts (same structure as PDF-based discovery)
+    """
+    candidates = []
+    
+    if not artifacts_dir.exists():
+        return candidates
+    
+    try:
+        for artifact_dir in artifacts_dir.iterdir():
+            if not artifact_dir.is_dir():
+                continue
+            
+            basename = artifact_dir.name
+            
+            # Skip if already discovered via PDF
+            if basename in seen_basenames:
+                continue
+            
+            # Look for sum.json
+            sum_json_path = artifact_dir / "sum.json"
+            if not sum_json_path.exists():
+                continue
+            
+            # Load metadata from sum.json
+            try:
+                with open(sum_json_path, 'r', encoding='utf-8') as f:
+                    sum_data = json.load(f)
+            except Exception as e:
+                print(f"[WARN] Could not parse {sum_json_path}: {e}")
+                continue
+            
+            # Extract metadata
+            meta = sum_data.get("meta", {})
+            provider = meta.get("provider", "Unknown")
+            title = meta.get("title", basename)
+            published_date = meta.get("published_date", "")
+            horizon = meta.get("horizon", "u")
+            products = meta.get("products", [])
+            
+            # Map provider to category
+            category = detect_category(f"{provider}_dummy.pdf")
+            
+            # Apply category filter
+            if selected and "All" not in selected and category not in selected:
+                continue
+            
+            # Parse date
+            date_fmt = "Unknown"
+            is_today = False
+            dt = None
+            
+            if published_date:
+                try:
+                    dt = datetime.datetime.strptime(published_date, "%Y%m%d")
+                    date_fmt = dt.strftime("%Y-%m-%d")
+                    is_today = (dt.date() == datetime.date.today())
+                except:
+                    pass
+            
+            # Apply date range filter
+            if dt:
+                if start_date and dt.date() < datetime.datetime.fromisoformat(start_date).date():
+                    continue
+                if end_date and dt.date() > datetime.datetime.fromisoformat(end_date).date():
+                    continue
+            elif start_date or end_date:
+                # Skip if date filter active but date unparseable
+                continue
+            
+            # Map horizon to frequency
+            horizon_map = {"d": "Daily", "w": "Weekly", "m": "Monthly", "q": "Quarterly", "y": "Yearly", "u": ""}
+            frequency = horizon_map.get(horizon.lower(), "")
+            
+            # Apply title search filter
+            if tt and tt not in title.lower():
+                continue
+            
+            # Build product categories
+            product_categories = {}
+            for product in products:
+                # Simple grouping (could be enhanced)
+                if product in ["GC", "SI", "HG", "PL"]:
+                    product_categories.setdefault("Metals", []).append(product)
+                elif product in ["CL", "NG", "RB", "HO"]:
+                    product_categories.setdefault("Energy", []).append(product)
+                elif product in ["ZC", "ZS", "ZW", "ZL"]:
+                    product_categories.setdefault("Ags", []).append(product)
+                else:
+                    product_categories.setdefault("Other", []).append(product)
+            
+            # Extract scores and extraction status
+            extraction = sum_data.get("extraction", {})
+            extraction_status = extraction.get("status", "unknown")
+            extraction_quality = extraction.get("extraction_quality_0_100", None)
+            is_low_confidence = extraction.get("is_low_confidence", False)
+            
+            # Attempt to compute scores from sections
+            sections = sum_data.get("sections", {})
+            tldr = sections.get("tldr", [])
+            trade_ideas = sections.get("trade_ideas", [])
+            
+            # Simple score heuristic based on content richness
+            summary_score = None
+            if extraction_status == "ok" and tldr:
+                base_score = 5
+                if len(tldr) >= 3:
+                    base_score += 2
+                if len(trade_ideas) > 0:
+                    base_score += 2
+                if product_categories:
+                    base_score += 1
+                summary_score = min(10, base_score)
+            
+            # Chart score (assume 0 if no extraction)
+            chart_score = 0
+            
+            # Build fake filename for consistency
+            fake_fname = f"{basename}.pdf"
+            fake_path = str(artifact_dir.parent.parent / "originals" / fake_fname)  # Won't exist, but needed for structure
+            
+            # Summary filenames (artifacts layout)
+            pdf_filename = f"artifacts/{basename}/sum.pdf"
+            json_filename = f"artifacts/{basename}/sum.json"
+            
+            # Check if sum.pdf exists
+            has_sum_pdf = (artifact_dir / "sum.pdf").exists()
+            summary_filename = pdf_filename if has_sum_pdf else json_filename
+            
+            candidates.append({
+                'path': fake_path,  # Fake path (original PDF may not exist)
+                'fname': fake_fname,
+                'category': category,
+                'summary_type': 'article',
+                'title_str': title,
+                'date_fmt': date_fmt,
+                'is_today': is_today,
+                'frequency': frequency,
+                'timeframe': horizon,
+                'subj': "General",
+                'has_summary': True,  # We know it has a summary (we found sum.json)
+                'summary_pdf_filename': pdf_filename if has_sum_pdf else "",
+                'summary_json_filename': json_filename,
+                'summary_filename': summary_filename,
+                'product_categories': product_categories,
+                'summary_score': summary_score,
+                'chart_score': chart_score,
+                'extraction_status': extraction_status,
+                'extraction_quality': extraction_quality,
+                'is_low_confidence': is_low_confidence,
+                '_discovered_from_artifacts': True  # Flag to indicate fallback discovery
+            })
+    
+    except Exception as e:
+        print(f"[ERROR] Fallback discovery failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return candidates
 
 
 def load_product_categories_from_summary(summary_path: str) -> dict:
@@ -388,9 +841,24 @@ def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]
     Load summary_score_0_10 and chart_score_0_3 from summary JSON file.
     Supports BOTH old and new (Option B) schema formats for backward compatibility.
     
+    Args:
+        summary_path: Path to JSON file (can be legacy path or new artifacts/ path)
+    
     Returns: (summary_score, chart_score) or (None, None) if not found/invalid
     """
     try:
+        # Handle both legacy and new paths
+        if PATH_MANAGER_AVAILABLE and PATH_MANAGER and 'artifacts/' in summary_path:
+            # New layout: artifacts/<basename>/sum.json
+            parts = summary_path.split('artifacts/')
+            if len(parts) > 1:
+                subpath = parts[1]  # <basename>/sum.json
+                basename = subpath.split('/')[0]
+                json_path = PATH_MANAGER.artifact_path(basename, 'sum.json')
+                if not json_path.exists():
+                    return None, None
+                summary_path = str(json_path)
+        
         if not os.path.exists(summary_path):
             return None, None
         
@@ -433,20 +901,36 @@ def load_summary_score(summary_path: str) -> tuple[Optional[int], Optional[int]]
         return None, None
 
 
-def load_extraction_status(summary_path: str) -> tuple[str, Optional[int]]:
+def load_extraction_status(summary_path: str) -> tuple[str, Optional[int], bool]:
     """
-    Load extraction status and quality from summary JSON file.
+    Load extraction status, quality, and low_confidence flag from summary JSON file.
     
-    Returns: (status, quality_score) where:
-        - status: "ok" | "failed" | "unknown"
+    Returns: (status, quality_score, is_low_confidence) where:
+        - status: "ok" | "degraded" | "failed" | "unknown"
         - quality_score: extraction_quality_0_100 (0-100) or None
+        - is_low_confidence: bool flag from meta.low_confidence
     """
     try:
+        # Handle both legacy and new paths (same as load_summary_score)
+        if PATH_MANAGER_AVAILABLE and PATH_MANAGER and 'artifacts/' in summary_path:
+            parts = summary_path.split('artifacts/')
+            if len(parts) > 1:
+                subpath = parts[1]
+                basename = subpath.split('/')[0]
+                json_path = PATH_MANAGER.artifact_path(basename, 'sum.json')
+                if not json_path.exists():
+                    return "unknown", None, False
+                summary_path = str(json_path)
+        
         if not os.path.exists(summary_path):
-            return "unknown", None
+            return "unknown", None, False
         
         with open(summary_path, 'r', encoding='utf-8') as f:
             summary = json.load(f)
+        
+        # Check if summary was skipped by triage
+        if summary.get("skipped", False):
+            return "skipped", None, False
         
         # Check meta.extraction.status
         meta = summary.get("meta", {})
@@ -454,8 +938,11 @@ def load_extraction_status(summary_path: str) -> tuple[str, Optional[int]]:
         status = extraction.get("status", "unknown")
         quality = extraction.get("extraction_quality_0_100")
         
-        # Validate status
-        if status not in ["ok", "failed", "unknown"]:
+        # Check low_confidence flag
+        is_low_confidence = meta.get("low_confidence", False)
+        
+        # Validate status (now includes "degraded" and "skipped")
+        if status not in ["ok", "degraded", "failed", "skipped", "unknown"]:
             status = "unknown"
         
         # Validate quality
@@ -466,9 +953,9 @@ def load_extraction_status(summary_path: str) -> tuple[str, Optional[int]]:
             except (ValueError, TypeError):
                 quality = None
         
-        return status, quality
+        return status, quality, is_low_confidence
     except Exception:
-        return "unknown", None
+        return "unknown", None, False
 
 
 def load_timeframe_from_summary(json_path: str) -> Optional[str]:
@@ -501,6 +988,27 @@ def load_timeframe_from_summary(json_path: str) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def load_horizon_from_summary(json_path: str) -> str:
+    """
+    Load horizon code from summary JSON meta.horizon field.
+    Used for new filename format where horizon is not in filename.
+    
+    Returns: horizon code (e.g., 'w', 'm', 'q', 'y') or 'u' if not found
+    """
+    try:
+        if not os.path.exists(json_path):
+            return 'u'
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            summary = json.load(f)
+        
+        meta = summary.get("meta", {})
+        horizon = meta.get("horizon", "u")
+        return horizon if horizon else "u"
+    except Exception:
+        return 'u'
 
 
 def parse_rollup_filename(fname: str) -> Optional[dict]:
@@ -884,7 +1392,6 @@ server = app.server
 ############################
 files_layout = html.Div(
     id="files-section",
-    style={"backgroundColor": APP_BG_COLOR, "padding": "40px 20px", "minHeight": "100vh"},
     children=[
 
         # Title
@@ -894,40 +1401,32 @@ files_layout = html.Div(
                 "width": "100%",
                 "textAlign": "center",
                 "color": TITLE_COLOR,
-                "marginBottom": "20px",
-                "fontFamily": "Arial, sans-serif",
+                "marginBottom": "35px",
             },
         ),
 
         # ── Row 1: Author/Source Filter (3 cols, Others last) ──
         html.Div(
+            className="provider-checklist-section",
             style={
                 "display": "flex",
                 "justifyContent": "center",
                 "alignItems": "flex-start",
                 "gap": "20px",
-                "marginBottom": "20px",
+                "marginBottom": "25px",
             },
             children=[
                 html.Div(
-                    dcc.Checklist(
-                        id="box-dropdown",
-                        options=CATEGORY_OPTIONS,
-                        value=[opt["value"] for opt in CATEGORY_OPTIONS],  # all selected by default
-                        inputStyle={"marginRight": "6px"},
-                        labelStyle={"display": "block"},
-                    ),
-                    style={
-                        "columnCount": 3,
-                        "columnGap": "1em",
-                        "border": "1px solid #ccc",
-                        "borderRadius": "4px",
-                        "padding": "10px",
-                        "maxHeight": "260px",
-                        "overflowY": "auto",
-                        "width": "80%",
-                        "margin": "0 auto",
-                    },
+                    className="provider-checklist-wrapper",
+                    children=[
+                        dcc.Checklist(
+                            id="box-dropdown",
+                            options=CATEGORY_OPTIONS,
+                            value=[opt["value"] for opt in CATEGORY_OPTIONS],  # all selected by default
+                            inputStyle={"marginRight": "8px"},
+                            labelStyle={"display": "block"},
+                        ),
+                    ],
                 ),
                 html.Div(
                     [
@@ -943,7 +1442,7 @@ files_layout = html.Div(
                     style={
                         "display": "flex",
                         "flexDirection": "column",
-                        "gap": "8px",
+                        "gap": "10px",
                         "justifyContent": "center",
                     },
                 ),
@@ -952,17 +1451,14 @@ files_layout = html.Div(
 
         # ── Row 2: Search Bars + Date Range + Counter (horizontal layout) ──
         html.Div(
+            className="search-controls-wrapper",
             style={
                 "display": "flex",
                 "flexWrap": "wrap",
                 "justifyContent": "center",
                 "alignItems": "center",
                 "gap": "15px",
-                "marginBottom": "20px",
-                "padding": "15px",
-                "backgroundColor": "#f8f9fa",
-                "borderRadius": "8px",
-                "border": "1px solid #dee2e6",
+                "marginBottom": "25px",
             },
             children=[
                 # Title search
@@ -971,7 +1467,7 @@ files_layout = html.Div(
                     type="text",
                     placeholder="Search Titles…",
                     debounce=True,
-                    style={"width": "250px", "padding": "6px"},
+                    style={"width": "250px"},
                 ),
                 html.Button("×", id="clear-title-search", className="btn btn-link btn-sm"),
                 html.Button("Search", id="title-search-btn", className="btn btn-primary btn-sm"),
@@ -982,7 +1478,7 @@ files_layout = html.Div(
                     type="text",
                     placeholder="Search inside PDFs…",
                     debounce=True,
-                    style={"width": "250px", "padding": "6px"},
+                    style={"width": "250px"},
                 ),
                 html.Button("×", id="clear-content-search", className="btn btn-link btn-sm"),
                 html.Button("Search", id="content-search-btn", className="btn btn-primary btn-sm"),
@@ -990,7 +1486,7 @@ files_layout = html.Div(
                 # Date range
                 html.Label(
                     "📅",
-                    style={'fontWeight': 'bold', 'fontSize': '14px', 'marginLeft': '10px'}
+                    style={'fontWeight': 'bold', 'fontSize': '16px', 'marginLeft': '10px'}
                 ),
                 dcc.DatePickerRange(
                     id='date-range-picker',
@@ -1013,22 +1509,10 @@ files_layout = html.Div(
                     className="btn btn-sm btn-outline-primary",
                     style={"whiteSpace": "nowrap"}
                 ),
-                # html.Button(
-                #     "View Latest Weekly Recap",
-                #     id="btn_view_latest_weekly",
-                #     className="btn btn-sm btn-outline-primary",
-                #     style={"whiteSpace": "nowrap"}
-                # ),
                 
                 # Article counter
                 html.Div(
                     id='article-counter',
-                    style={
-                        'fontSize': '15px',
-                        'color': '#495057',
-                        'fontWeight': '500',
-                        'marginLeft': '10px'
-                    },
                     children="Loading..."
                 ),
             ],
@@ -1098,33 +1582,43 @@ files_layout = html.Div(
         ),
 
         # Row 5: DataTable
-        dcc.Loading(
-            id="loading-table",
-            type="default",
-            style={"width": "100%"},
+        html.Div(
+            className="table-container",
+            style={"marginTop": "25px"},
             children=[
-                    dash_table.DataTable(
-                    id="files-table",
-                    columns=[
-                        {"id": "firm",             "name": "Firm"},
-                        {"id": "frequency",        "name": "Frequency"},
-                        {"id": "date",             "name": "Date"},
-                        {"id": "title",            "name": "Title"},
-                        {"id": "product_categories", "name": "Categories"},
-                        {"id": "view",             "name": "View",    "presentation": "markdown"},
-                        {"id": "summary",          "name": "Summary", "presentation": "markdown"},
-                        {"id": "summary_score",    "name": "Score",   "type": "numeric"},
-                        {"id": "chart_score",      "name": "Charts",  "type": "numeric"},
-                    ],
-                    data=[],
-                    filter_action="native",
-                    sort_action="native",
-                    page_action="native",
-                    page_size=20,
+                dcc.Loading(
+                    id="loading-table",
+                    type="default",
+                    style={"width": "100%"},
+                    children=[
+                            dash_table.DataTable(
+                            id="files-table",
+                            columns=[
+                                {"id": "firm",             "name": "Firm"},
+                                {"id": "frequency",        "name": "Frequency"},
+                                {"id": "date",             "name": "Date"},
+                                {"id": "title",            "name": "Title"},
+                                {"id": "product_categories", "name": "Categories"},
+                                {"id": "view",             "name": "View",    "presentation": "markdown"},
+                                {"id": "summary",          "name": "Summary", "presentation": "markdown"},
+                                {"id": "summary_score",    "name": "Score",   "type": "numeric"},
+                                {"id": "chart_score",      "name": "Charts",  "type": "numeric"},
+                                {"id": "basename",         "name": "basename", "hideable": True},  # Hidden via hidden_columns property
+                            ],
+                            data=[],
+                            hidden_columns=["basename"],  # Supported way to hide columns
+                            filter_action="native",
+                            sort_action="native",
+                            page_action="native",
+                            page_size=20,
+                            
+                            # Enable row clicks
+                            row_selectable=False,  # Don't use checkboxes
+                            active_cell=None,  # Track cell clicks
 
 
-                    # highlight today's rows
-                    style_data_conditional=[
+                            # highlight today's rows
+                            style_data_conditional=[
                         # 1) odd/even for all the other rows
                         {"if": {"row_index": "odd"},  "backgroundColor": ROW_ODD_COLOR},
                         {"if": {"row_index": "even"}, "backgroundColor": ROW_EVEN_COLOR},
@@ -1193,8 +1687,7 @@ files_layout = html.Div(
                     style_table={"width": "100%", "overflowX": "auto"},
                     style_cell={
                         "textAlign": "left",
-                        "padding": "8px",
-                        "fontFamily": "Arial, sans-serif",
+                        "padding": "12px",
                         "whiteSpace": "nowrap",
                         "overflow": "hidden",
                         "textOverflow": "ellipsis",
@@ -1209,6 +1702,8 @@ files_layout = html.Div(
                         "fontWeight": "bold",
                     },
                 )
+                    ],
+                ),
             ],
         ),
     ],
@@ -1224,6 +1719,10 @@ app.layout = html.Div([
     dcc.Store(id='login-status', storage_type='session', data=False),
         # store to track which user is logged in
     dcc.Store(id='login-user',   storage_type='session', data=""),
+    
+    # Stores for daily view
+    dcc.Store(id='daily-articles-store', data=[]),
+    dcc.Store(id='daily-selected-artifact', data=""),
     
     # Location for navigation
     dcc.Location(id='url', refresh=True),
@@ -1350,8 +1849,99 @@ app.layout = html.Div([
             dcc.Store(id="nav-url-store", data=""),
             html.Div(id="dummy-nav-output", style={"display": "none"}),
 
-            # file-browser UI!
-            files_layout
+            # Tabs for Daily View and Library
+            dcc.Tabs(
+                id='main-tabs',
+                value='daily-view',  # default tab
+                children=[
+
+                    # ---- TAB 1: DAILY VIEW ----
+                    dcc.Tab(
+                        label='Daily View',
+                        value='daily-view',
+                        style=TAB_STYLE,
+                        selected_style=SELECTED_TAB_STYLE,
+                        children=[
+                            html.Div(
+                                id="daily-view-container",
+                                style={"padding": "20px"},
+                                children=[
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "gap": "20px",
+                                            "height": "calc(100vh - 200px)"
+                                        },
+                                        children=[
+                                            # Sidebar with article list
+                                            html.Div(
+                                                id="daily-view-sidebar",
+                                                style={
+                                                    "width": "300px",
+                                                    "minWidth": "300px",
+                                                    "overflowY": "auto",
+                                                    "borderRight": "1px solid #ddd",
+                                                    "paddingRight": "15px"
+                                                },
+                                                children=[
+                                                    html.H3(
+                                                        "Yesterday's Articles",
+                                                        style={
+                                                            "marginBottom": "15px",
+                                                            "color": HEADER_BG_COLOR
+                                                        }
+                                                    ),
+                                                    html.Div(id="daily-view-article-list")
+                                                ]
+                                            ),
+                                            # Main content panel
+                                            html.Div(
+                                                id="daily-view-main",
+                                                style={
+                                                    "flex": "1",
+                                                    "overflowY": "auto",
+                                                    "paddingLeft": "15px"
+                                                },
+                                                children=[
+                                                    html.Div(id="daily-view-content")
+                                                ]
+                                            )
+                                        ]
+                                    )
+                                ]
+                            )
+                        ]
+                    ),
+
+                    # ---- TAB 2: LIBRARY ----
+                    dcc.Tab(
+                        label='Library',
+                        value='library',
+                        style=TAB_STYLE,
+                        selected_style=SELECTED_TAB_STYLE,
+                        children=[
+                            html.Div(
+                                id="library-container",
+                                style={"padding": "20px"},
+                                children=[
+                                    # Table view wrapper
+                                    html.Div(
+                                        id="table-view-container",
+                                        style={"display": "block"},
+                                        children=[files_layout]
+                                    ),
+                                    # Summary view wrapper
+                                    html.Div(
+                                        id="summary-view-container",
+                                        style={"display": "none"},
+                                        children=[]
+                                    )
+                                ]
+                            )
+                        ]
+                    ),
+                ]
+            )
         ]
     )
 ])
@@ -1634,63 +2224,51 @@ def update_file_table(
         if not os.path.isdir(dpath):
             continue
 
-        for fname in sorted(os.listdir(dpath)):
+        # Use helper to collect all PDFs from both new and legacy layouts
+        # (deduplicates by basename, prioritizes new layout)
+        all_pdfs = iter_all_candidate_pdfs(dpath)
+        
+        # Process all discovered PDFs (both new and legacy)
+        for fname, full_path, layout_type in all_pdfs:
             # only PDFs
             if not fname.lower().endswith(".pdf") or fname == "README.txt":
                 continue
 
-            # now `fname` is bound—detect its category:
-            category = detect_category(fname)
+            # Parse filename using helper (supports both old and new formats)
+            parsed = parse_pdf_filename(fname)
+            provider = parsed['provider']
+            title_str = parsed['title_str']
+            date_fmt = parsed['date_fmt']
+            frequency = parsed['frequency']
+            horizon_code = parsed['horizon_code']
+            is_today = parsed['is_today']
+            
+            # Use provider as category (firm) for filtering
+            # This works for both old and new formats
+            category = provider if provider else "Others"
 
             # apply multi-select filter
             if selected and "All" not in selected and category not in selected:
                 continue
 
-            # parse Title / Date / Frequency
-            core, _ = os.path.splitext(fname)
-            parts = core.split("_")
-            if len(parts) >= 4:
-                _, *tp, date_part, fcode = parts
-                title_str = " ".join(tp).replace("_", " ")
-            elif len(parts) == 3:
-                _, title_str, date_part = parts
-                title_str = title_str.replace("_", " ")
-                fcode = "u"
+            # Apply date range filter
+            if date_fmt != "Unknown":
+                try:
+                    dt = datetime.datetime.strptime(date_fmt, "%Y-%m-%d")
+                    if start_date and dt.date() < datetime.datetime.fromisoformat(start_date).date():
+                        continue  # Skip files before start_date
+                    if end_date and dt.date() > datetime.datetime.fromisoformat(end_date).date():
+                        continue  # Skip files after end_date
+                except:
+                    pass
             else:
-                title_str = "_".join(parts[1:])
-                date_part = ""
-                fcode = "u"
-
-            # extract date + flag if it's today
-            try:
-                dt = datetime.datetime.strptime(date_part, "%Y%m%d")
-                date_fmt = dt.strftime("%Y-%m-%d")
-                is_today = (dt.date() == datetime.date.today())
-                
-                # Apply date range filter (uses already-parsed dt object)
-                if start_date and dt.date() < datetime.datetime.fromisoformat(start_date).date():
-                    continue  # Skip files before start_date
-                if end_date and dt.date() > datetime.datetime.fromisoformat(end_date).date():
-                    continue  # Skip files after end_date
-                    
-            except:
-                date_fmt = "Unknown"
-                is_today = False
-                
                 # Skip files with unparseable dates if date filter is active
                 if start_date or end_date:
                     continue
 
-            # map frequency
-            fmap = {"y":"Yearly","q":"Quarterly","m":"Monthly","w":"Weekly","u":""}
-            frequency = fmap.get(fcode.lower(), "unknown")
-
             # title search filter
             if tt and tt not in title_str.lower():
                 continue
-            
-            # Collect file info for batch PDF search
-            full_path = os.path.join(dpath, fname)
             
             # Check for summary (do this ONCE during candidate building, not later)
             has_sum, pdf_filename, json_filename = has_summary_file(full_path)
@@ -1705,16 +2283,29 @@ def update_file_table(
             timeframe = None
             extraction_status = "unknown"
             extraction_quality = None
+            is_low_confidence = False
+            
             if json_filename:
-                json_path = os.path.join(dpath, json_filename)
+                # Build full path for JSON (handle both layouts)
+                if 'artifacts/' in json_filename:
+                    # New layout - json_filename is already a relative path
+                    json_path = os.path.join(FILES_DIR, json_filename)
+                else:
+                    # Legacy layout
+                    json_path = os.path.join(dpath, json_filename)
+                
                 product_categories = load_product_categories_from_summary(json_path)
                 summary_score, chart_score = load_summary_score(json_path)
                 timeframe = load_timeframe_from_summary(json_path)
-                extraction_status, extraction_quality = load_extraction_status(json_path)
-            elif pdf_filename:
-                # If only PDF exists, try to load from corresponding JSON
-                json_path = os.path.join(dpath, json_filename)  # This will be empty, so skip
-                # We can't load score from PDF easily, so leave it None
+                extraction_status, extraction_quality, is_low_confidence = load_extraction_status(json_path)
+                
+                # Override horizon_code from sum.json if filename didn't have it (new format)
+                if horizon_code == 'u':
+                    horizon_code = load_horizon_from_summary(json_path)
+                    # Map horizon code to frequency
+                    fmap = {"y": "Yearly", "q": "Quarterly", "m": "Monthly", "w": "Weekly", "u": ""}
+                    frequency = fmap.get(horizon_code.lower(), "")
+            # else: pdf_filename only or no summary - use initialized defaults
             
             candidate_files.append({
                 'path': full_path,
@@ -1734,9 +2325,26 @@ def update_file_table(
                 'product_categories': product_categories,
                 'summary_score': summary_score,           # Score for color coding (0-10)
                 'chart_score': chart_score,               # Chart score (0-3)
-                'extraction_status': extraction_status,    # Extraction status: "ok" | "failed" | "unknown"
-                'extraction_quality': extraction_quality   # Extraction quality (0-100) or None
+                'extraction_status': extraction_status,    # Extraction status: "ok" | "degraded" | "failed" | "unknown"
+                'extraction_quality': extraction_quality,  # Extraction quality (0-100) or None
+                'is_low_confidence': is_low_confidence     # Low confidence flag
             })
+
+    # 5) FALLBACK DISCOVERY: Scan artifacts/*/sum.json if few/no PDFs found
+    # This ensures the app works even if originals are missing or naming mismatches
+    if PATH_MANAGER_AVAILABLE and PATH_MANAGER and len(candidate_files) < 5:
+        print(f"[FALLBACK] Only {len(candidate_files)} PDFs found, scanning artifacts for orphaned summaries...")
+        fallback_candidates = discover_from_artifacts(
+            PATH_MANAGER.artifacts_dir,
+            FILES_DIR,
+            seen_basenames=set(os.path.splitext(f['fname'])[0] for f in candidate_files),
+            selected=selected,
+            start_date=start_date,
+            end_date=end_date,
+            tt=tt
+        )
+        candidate_files.extend(fallback_candidates)
+        print(f"[FALLBACK] Added {len(fallback_candidates)} artifacts-only entries")
 
     # Combine rollups and regular articles
     all_candidates = rollup_files + candidate_files
@@ -1818,7 +2426,8 @@ def update_file_table(
                 "summary":           summary_md,
                 "summary_score":     "N/A",
                 "chart_score":       "N/A",
-                "is_today":          file_info['is_today']
+                "is_today":          file_info['is_today'],
+                "basename":          file_info['fname'].replace('__sum.json', '').replace('.json', '')  # For rollups
             }
         else:
             # Regular articles: apply filters and formatting
@@ -1826,10 +2435,10 @@ def update_file_table(
             if ct and not pdf_results.get(file_info['path'], False):
                 continue
             
-            # Filter out failed summaries from main feed (do not publish)
+            # Filter out failed and triage-skipped summaries from main feed
             extraction_status = file_info.get('extraction_status', 'unknown')
-            if extraction_status == 'failed':
-                continue  # Skip failed summaries - do not publish to main feed
+            if extraction_status in ('failed', 'skipped'):
+                continue  # Skip failed/triage-skipped summaries - do not publish to main feed
             
             # build the single row (with is_today flag)
             safe = urllib.parse.quote(file_info['fname'])
@@ -1843,7 +2452,12 @@ def update_file_table(
                 # Prefer PDF summary
                 if file_info.get('summary_pdf_filename'):
                     safe_sum = urllib.parse.quote(file_info['summary_pdf_filename'])
-                    summary_md = f"[📄 View](/view?file={safe_sum})"
+                    
+                    # Add warning badge for degraded extractions
+                    if file_info.get('is_low_confidence') or extraction_status == 'degraded':
+                        summary_md = f"[⚠️ View](/view?file={safe_sum})"
+                    else:
+                        summary_md = f"[📄 View](/view?file={safe_sum})"
                 elif file_info.get('summary_json_filename'):
                     # Only JSON exists - link to JSON (but this shouldn't happen with new autorun)
                     safe_sum = urllib.parse.quote(file_info['summary_json_filename'])
@@ -1877,7 +2491,8 @@ def update_file_table(
                 "summary":           summary_md,
                 "summary_score":     summary_score_str,  # "N/A" or number string
                 "chart_score":       chart_score_str,    # "N/A" or number string
-                "is_today":          file_info['is_today']
+                "is_today":          file_info['is_today'],
+                "basename":          Path(file_info['fname']).stem  # Without .pdf extension
             }
         if login_user == "iwill":
             if not is_rollup:
@@ -2040,8 +2655,24 @@ def view_file():
             filename = os.path.basename(rollup_path)
             return send_from_directory(directory, filename)
         return "Rollup file not found.", 404
+    
+    # Handle artifacts/ paths (new layout)
+    if f.startswith("artifacts/"):
+        artifact_path = os.path.join(FILES_DIR, f)
+        if os.path.isfile(artifact_path):
+            directory = os.path.dirname(artifact_path)
+            filename = os.path.basename(artifact_path)
+            return send_from_directory(directory, filename)
+        return "Artifact file not found.", 404
 
-    # Check both directories
+    # Check originals/ first if path manager available
+    if PATH_MANAGER_AVAILABLE and PATH_MANAGER:
+        # Try originals/ first
+        original_path = PATH_MANAGER.original_pdf_path(f)
+        if original_path.exists():
+            return send_from_directory(str(original_path.parent), f)
+    
+    # Check both directories (legacy)
     dirs_to_check = [
         FILES_DIR,
         r"C:\Users\H&CDanHughes\Documents\SC_files"
@@ -2109,6 +2740,459 @@ def download_file():
             return send_from_directory(directory, f, as_attachment=True)
 
     return "File not found.", 404
+
+
+############################
+# 8) SUMMARY VIEW CALLBACKS
+############################
+
+@app.callback(
+    Output("url", "pathname"),
+    Input("files-table", "active_cell"),
+    State("files-table", "data"),
+    prevent_initial_call=True
+)
+def navigate_to_summary(active_cell, table_data):
+    """Navigate to summary view when table row is clicked."""
+    if not active_cell or not table_data:
+        raise PreventUpdate
+    
+    row_index = active_cell.get('row')
+    if row_index is None or row_index >= len(table_data):
+        raise PreventUpdate
+    
+    row = table_data[row_index]
+    basename = row.get('basename')
+    
+    if not basename:
+        raise PreventUpdate
+    
+    # Navigate to /summary/<basename>
+    return f"/summary/{basename}"
+
+
+def render_summary_components(basename: str):
+    """
+    Render Dash components for a given article's web summary.
+    
+    Args:
+        basename: The article basename (filename without path)
+        
+    Returns:
+        Dash component(s) representing the rendered summary
+    """
+    if not SUMMARY_VIEW_AVAILABLE:
+        return html.Div("Summary view not available", style={"padding": "40px", "textAlign": "center"})
+    
+    # Load summary JSON
+    sum_json = load_summary_json(
+        basename,
+        Path(FILES_DIR),
+        path_manager=PATH_MANAGER if PATH_MANAGER_AVAILABLE else None
+    )
+    
+    if sum_json is None:
+        # Summary not found
+        return html.Div([
+            html.H2("Summary Not Found", style={"color": "#dc3545", "textAlign": "center"}),
+            html.P(f"Could not load summary for: {basename}", style={"textAlign": "center"}),
+            dcc.Link('← Back to Articles', href='/', style={
+                'display': 'inline-block',
+                'padding': '10px 20px',
+                'backgroundColor': '#007bff',
+                'color': 'white',
+                'textDecoration': 'none',
+                'borderRadius': '4px',
+                'marginTop': '20px'
+            })
+        ], style={"padding": "40px", "textAlign": "center"})
+    
+    # Check if stub/failed
+    if is_stub_summary(sum_json):
+        return render_failed_summary(sum_json, basename)
+    else:
+        return render_summary_view(basename, sum_json)
+
+
+@app.callback(
+    [
+        Output("table-view-container", "style"),
+        Output("summary-view-container", "style"),
+        Output("summary-view-container", "children"),
+    ],
+    Input("url", "pathname"),
+    prevent_initial_call=False
+)
+def display_page(pathname):
+    """Route between table view and summary view based on URL."""
+    if not pathname or pathname == "/":
+        # Show table view
+        return (
+            {"display": "block"},  # table-view
+            {"display": "none"},   # summary-view
+            []                     # summary content
+        )
+    
+    # Check if summary view
+    if pathname.startswith("/summary/"):
+        basename = pathname.replace("/summary/", "")
+        content = render_summary_components(basename)
+        
+        return (
+            {"display": "none"},   # table-view
+            {"display": "block"},  # summary-view
+            content
+        )
+    
+    # Unknown route - show table
+    return (
+        {"display": "block"},
+        {"display": "none"},
+        []
+    )
+
+
+############################
+# 8) DAILY VIEW CALLBACKS
+############################
+
+@app.callback(
+    [
+        Output("daily-articles-store", "data"),
+        Output("daily-view-article-list", "children")
+    ],
+    [
+        Input("login-status", "data"),
+        Input("main-tabs", "value")
+    ],
+    prevent_initial_call=False
+)
+def populate_daily_view_sidebar(login_status, active_tab):
+    """
+    Populate the Daily View sidebar from artifact folders.
+
+    Only calls get_yesterday_artifacts() when the user is logged in
+    AND the active tab is 'daily-view'.
+    """
+    if not DAILY_VIEW_AVAILABLE:
+        return [], [
+            html.P(
+                "Daily view not available",
+                style={"color": "#999", "fontStyle": "italic"}
+            )
+        ]
+
+    if not login_status or active_tab != "daily-view":
+        return [], []
+
+    try:
+        artifacts = get_yesterday_artifacts()
+    except Exception as e:
+        print(f"[ERROR] get_yesterday_artifacts failed: {e}")
+        return [], [
+            html.P(
+                f"Error loading artifacts: {e}",
+                style={"color": "#dc3545"}
+            )
+        ]
+
+    if not artifacts:
+        return [], [
+            html.P(
+                "No articles found for yesterday.",
+                style={
+                    "color": "#999",
+                    "fontStyle": "italic",
+                    "padding": "20px",
+                    "textAlign": "center"
+                }
+            )
+        ]
+
+    # --- build sidebar buttons keyed by artifact_folder ---
+    sidebar_buttons = [
+        html.Button(
+            [
+                html.Div(
+                    "Daily Summary",
+                    style={"fontWeight": "bold", "marginBottom": "3px"}
+                ),
+                html.Div(
+                    f"{len(artifacts)} articles",
+                    style={"fontSize": "11px", "color": "#666"}
+                )
+            ],
+            id={"type": "daily-article-btn", "index": "__daily_summary__"},
+            n_clicks=0,
+            style={
+                "width": "100%",
+                "padding": "12px",
+                "marginBottom": "10px",
+                "backgroundColor": "#e3f2fd",
+                "border": "1px solid #90caf9",
+                "borderRadius": "6px",
+                "cursor": "pointer",
+                "textAlign": "left",
+                "transition": "all 0.2s"
+            },
+            className="daily-article-button"
+        ),
+        html.Hr(
+            style={
+                "margin": "15px 0",
+                "border": "none",
+                "borderTop": "1px solid #ddd"
+            }
+        )
+    ]
+
+    for art in artifacts:
+        # Availability badge
+        if art["has_sum_json"]:
+            badge_text = "JSON"
+            badge_color = "#28a745"
+        elif art["has_sum_pdf"]:
+            badge_text = "PDF"
+            badge_color = "#007bff"
+        else:
+            badge_text = "—"
+            badge_color = "#999"
+
+        sidebar_buttons.append(
+            html.Button(
+                [
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "justifyContent": "space-between",
+                            "alignItems": "center",
+                            "marginBottom": "3px"
+                        },
+                        children=[
+                            html.Span(
+                                art["provider"],
+                                style={
+                                    "fontSize": "11px",
+                                    "color": "#666",
+                                    "fontWeight": "500"
+                                }
+                            ),
+                            html.Span(
+                                badge_text,
+                                style={
+                                    "fontSize": "10px",
+                                    "color": "#fff",
+                                    "backgroundColor": badge_color,
+                                    "padding": "1px 6px",
+                                    "borderRadius": "3px"
+                                }
+                            )
+                        ]
+                    ),
+                    html.Div(
+                        art["title"],
+                        style={
+                            "fontSize": "13px",
+                            "lineHeight": "1.3",
+                            "overflow": "hidden",
+                            "textOverflow": "ellipsis",
+                            "display": "-webkit-box",
+                            "WebkitLineClamp": "2",
+                            "WebkitBoxOrient": "vertical"
+                        }
+                    )
+                ],
+                id={
+                    "type": "daily-article-btn",
+                    "index": art["artifact_folder"]
+                },
+                n_clicks=0,
+                style={
+                    "width": "100%",
+                    "padding": "10px",
+                    "marginBottom": "8px",
+                    "backgroundColor": "#fff",
+                    "border": "1px solid #ddd",
+                    "borderRadius": "4px",
+                    "cursor": "pointer",
+                    "textAlign": "left",
+                    "transition": "all 0.2s"
+                },
+                className="daily-article-button"
+            )
+        )
+
+    return artifacts, sidebar_buttons
+
+
+@app.callback(
+    [
+        Output("daily-selected-artifact", "data"),
+        Output("daily-view-content", "children")
+    ],
+    Input({"type": "daily-article-btn", "index": dash.dependencies.ALL}, "n_clicks"),
+    State("daily-articles-store", "data"),
+    prevent_initial_call=True
+)
+def display_daily_article_summary(n_clicks_list, artifacts):
+    """
+    Render the right-panel content for the selected artifact folder.
+
+    Rendering strategy:
+      1. has_sum_json  → load JSON and render web summary
+      2. has_sum_pdf   → embed PDF via iframe
+      3. neither       → show clear message with missing paths
+    """
+    if not ctx.triggered:
+        raise PreventUpdate
+
+    triggered_id = ctx.triggered_id
+    if not triggered_id:
+        raise PreventUpdate
+
+    folder_key = triggered_id.get("index")
+
+    # --- Daily Summary placeholder ---
+    if folder_key == "__daily_summary__":
+        return "", html.Div([
+            html.H2(
+                "Daily Summary",
+                style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}
+            ),
+            html.P(
+                "Daily rollup summary coming soon...",
+                style={"color": "#999", "fontStyle": "italic"}
+            ),
+            html.P(
+                f"Found {len(artifacts)} artifacts for yesterday.",
+                style={"marginTop": "15px"}
+            )
+        ], style={"padding": "20px"})
+
+    # --- Locate the selected artifact dict ---
+    art = next(
+        (a for a in artifacts if a["artifact_folder"] == folder_key),
+        None
+    )
+    if art is None:
+        return "", html.Div(
+            f"Artifact folder not found: {folder_key}",
+            style={"padding": "20px", "color": "#dc3545"}
+        )
+
+    # --- Strategy 1: render from sum.json ---
+    if art["has_sum_json"]:
+        try:
+            with open(art["sum_json_path"], "r", encoding="utf-8") as fh:
+                sum_json = json.load(fh)
+
+            if SUMMARY_VIEW_AVAILABLE:
+                if is_stub_summary(sum_json):
+                    content = render_failed_summary(sum_json, art["artifact_folder"])
+                else:
+                    content = render_summary_view(art["artifact_folder"], sum_json)
+            else:
+                content = html.Div(
+                    "Summary renderer not available.",
+                    style={"padding": "40px", "textAlign": "center"}
+                )
+        except Exception as e:
+            content = html.Div([
+                html.H3("Error loading summary", style={"color": "#dc3545"}),
+                html.P(str(e)),
+                html.Code(art["sum_json_path"], style={"fontSize": "12px"})
+            ], style={"padding": "20px"})
+
+        return art["artifact_folder"], content
+
+    # --- Strategy 2: embed sum.pdf in iframe ---
+    if art["has_sum_pdf"]:
+        # Build a relative artifacts/ URL the /view route already serves
+        relative_pdf = f"artifacts/{art['artifact_folder']}/sum.pdf"
+        content = html.Div([
+            html.Div(
+                style={
+                    "display": "flex",
+                    "justifyContent": "space-between",
+                    "alignItems": "center",
+                    "marginBottom": "10px"
+                },
+                children=[
+                    html.H3(
+                        art["title"],
+                        style={"margin": "0", "color": HEADER_BG_COLOR}
+                    ),
+                    html.Span(
+                        art["provider"],
+                        style={"fontSize": "13px", "color": "#666"}
+                    )
+                ]
+            ),
+            html.Iframe(
+                src=f"/view?file={relative_pdf}",
+                style={
+                    "width": "100%",
+                    "height": "calc(100vh - 280px)",
+                    "border": "1px solid #ddd",
+                    "borderRadius": "4px"
+                }
+            )
+        ], style={"padding": "10px"})
+
+        return art["artifact_folder"], content
+
+    # --- Strategy 3: nothing available ---
+    artifacts_base = (
+        Path(FILES_DIR) / "artifacts"
+        if PATH_MANAGER_AVAILABLE and PATH_MANAGER
+        else Path(FILES_DIR) / "artifacts"
+    )
+    expected_json = str(artifacts_base / art["artifact_folder"] / "sum.json")
+    expected_pdf = str(artifacts_base / art["artifact_folder"] / "sum.pdf")
+
+    content = html.Div([
+        html.H3(
+            "No Summary Available",
+            style={"color": "#dc3545", "marginBottom": "15px"}
+        ),
+        html.P([
+            "Neither ",
+            html.Code("sum.json"),
+            " nor ",
+            html.Code("sum.pdf"),
+            " was found for this article."
+        ]),
+        html.Div([
+            html.P(
+                "Expected paths:",
+                style={"fontWeight": "bold", "marginBottom": "5px"}
+            ),
+            html.Code(
+                expected_json,
+                style={
+                    "display": "block",
+                    "marginBottom": "4px",
+                    "fontSize": "12px",
+                    "color": "#666"
+                }
+            ),
+            html.Code(
+                expected_pdf,
+                style={
+                    "display": "block",
+                    "fontSize": "12px",
+                    "color": "#666"
+                }
+            )
+        ], style={
+            "backgroundColor": "#f8f9fa",
+            "padding": "15px",
+            "borderRadius": "4px",
+            "marginTop": "15px"
+        })
+    ], style={"padding": "20px"})
+
+    return art["artifact_folder"], content
 
 
 ############################

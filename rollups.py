@@ -2,9 +2,12 @@
 Rollup Builder Module
 Purpose: Build daily/weekly rollups from existing __sum.json files only
 Author: Kevin Lefebvre
-Last Updated: 2026-01-11
+Last Updated: 2026-02-05
 Schema: twifo.rollup.v1
 ZERO-OCR RULE: This module NEVER touches PDFs or uses OCR
+
+Product tagging: Never default to ALL_PRODUCTS. Bullets use item.products, inference
+from text (tickers/keywords), or [] → General bucket. Dedupe by text.
 """
 
 from __future__ import annotations
@@ -43,7 +46,18 @@ def _looks_like_trade_idea(text: str) -> bool:
     return False
 
 def _iso_now() -> str:
-    return dt.datetime.now().isoformat(timespec="seconds")
+    """Return timezone-aware ISO-8601 (UTC) e.g. 2026-02-04T21:37:36Z."""
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _model_from_articles(article_sum_jsons: List[dict]) -> str:
+    """Derive meta.model from source articles; never return null/empty."""
+    for a in article_sum_jsons:
+        m = a.get("meta", {}).get("model") or a.get("meta", {}).get("summary_model_name")
+        if m and str(m).strip():
+            return str(m).strip()
+    return "aggregated"
+
 
 def load_json(p: Path) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
@@ -128,18 +142,109 @@ def _rank_trade_ideas(trades: List[dict]) -> List[dict]:
         return conf * 0.6 + source_count * 20
     return sorted(trades, key=score, reverse=True)
 
+# Bucket for unassigned bullets (products=[]). Never use ALL_PRODUCTS.
+GENERAL_BUCKET = "General"
+
+# Keyword → product mapping for inferring products from bullet text
+_KEYWORD_TO_PRODUCT: List[Tuple[str, str]] = [
+    (r"\boil\b|\bcrude\b", "CL"),
+    (r"\bgold\b", "GC"),
+    (r"\bsilver\b", "SI"),
+    (r"\bbonds?\b|\bTreasury\b|\byields?\b|\b10[- ]?[yY]ear\b|\b2[- ]?[yY]ear\b", "ZN"),
+    (r"\bZB\b|\b30[- ]?[yY]ear\b", "ZB"),
+    (r"\bequities?\b|\bS&P\b|\bSPX\b|\bES\b", "ES"),
+    (r"\bNasdaq\b|\bNQ\b", "NQ"),
+    (r"\bvolatility\b|\bVIX\b", "VIX"),
+    (r"\bbitcoin\b|\bcrypto\b|\bBTC\b", "BTC"),
+    (r"\bCL\b", "CL"),
+    (r"\bGC\b", "GC"),
+    (r"\bSI\b", "SI"),
+    (r"\bZN\b", "ZN"),
+    (r"\bES\b", "ES"),
+    (r"\bNQ\b", "NQ"),
+]
+
+
+def _infer_products_from_text(text: str, section: str, article_products: List[str]) -> List[str]:
+    """
+    Infer minimal product set from bullet text. Never returns ALL_PRODUCTS.
+    Uses: explicit tickers, section context, keyword mapping.
+    Returns [] if unknown (→ General bucket).
+    """
+    if not text or not isinstance(text, str):
+        return []
+    text_lower = text.lower()
+    found: set[str] = set()
+    for pattern, product in _KEYWORD_TO_PRODUCT:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            if product in PRODUCT_CODES:
+                found.add(product)
+    # Section hints: metals→GC/SI, energy→CL, rates→ZN/ZB, vol→VIX, crypto→BTC
+    if "metals" in section.lower() or "metal" in section.lower():
+        for p in ("GC", "SI"):
+            if p in article_products and any(k in text_lower for k in ["gold", "silver", "gc", "si"]):
+                found.add(p)
+    if "energy" in section.lower() and any(k in text_lower for k in ["oil", "crude", "cl"]):
+        if "CL" in article_products:
+            found.add("CL")
+    if "rates" in section.lower() or "bonds" in section.lower():
+        for p in ("ZN", "ZB"):
+            if p in article_products and any(k in text_lower for k in ["yield", "bond", "zn", "zb"]):
+                found.add(p)
+    return sorted(found) if found else []
+
+
+def _resolve_bullet_products(
+    it: dict,
+    text: str,
+    article_products: List[str],
+    section: str,
+) -> List[str]:
+    """
+    Resolve products for a bullet. NEVER default to article_products (ALL_PRODUCTS).
+    Priority: item.products → infer from text → [] (General).
+    """
+    item_products = it.get("products", []) if isinstance(it, dict) else []
+    if item_products and isinstance(item_products, list):
+        valid = [p for p in item_products if p in PRODUCT_CODES]
+        if valid:
+            return sorted(set(valid))
+    inferred = _infer_products_from_text(text, section, article_products)
+    if inferred:
+        return inferred
+    return []  # Unassigned → General
+
+
+def _dedupe_bullets(items: List[dict]) -> List[dict]:
+    """Dedupe by normalized text; merge sources."""
+    seen: Dict[str, dict] = {}
+    for it in items:
+        text = (it.get("text", "") if isinstance(it, dict) else str(it)).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            existing = seen[key]
+            sources = set(existing.get("sources", [])) | set(it.get("sources", []) if isinstance(it, dict) else [])
+            existing["sources"] = sorted(sources)
+        else:
+            seen[key] = dict(it) if isinstance(it, dict) else {"text": text, "sources": [], "products": []}
+    return list(seen.values())
+
+
 def _group_by_product(items: List[dict]) -> Dict[str, List[dict]]:
     """
-    Group items by product. Items without products go into "Other".
+    Group items by product. Items with products=[] go into General (never all products).
     """
-    grouped = defaultdict(list)
+    grouped: Dict[str, List[dict]] = defaultdict(list)
     for item in items:
         item_products = item.get("products", [])
         if item_products:
             for product in item_products:
-                grouped[product].append(item)
+                if product in PRODUCT_CODES:
+                    grouped[product].append(item)
         else:
-            grouped["Other"].append(item)
+            grouped[GENERAL_BUCKET].append(item)
     return dict(grouped)
 
 def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_articles_required: int = 3) -> dict:
@@ -155,8 +260,8 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
     providers = sorted({a.get("meta", {}).get("provider", "O") for a in article_sum_jsons})
     products = sorted({p for a in article_sum_jsons for p in (a.get("meta", {}).get("products") or [])})
 
-    # aggregate bullets - returns list of dicts with text, sources, products
     def gather(section: str, limit: int = 30, filter_trade_ideas: bool = False) -> List[dict]:
+        """Gather bullets; never default to ALL_PRODUCTS. products=[] → General."""
         out = []
         for a in article_sum_jsons:
             article_products = a.get("meta", {}).get("products", []) or []
@@ -164,31 +269,22 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             for it in items:
                 if isinstance(it, dict) and it.get("text"):
                     text = it["text"]
-                    # Filter out trade ideas if requested (for observations/what_occurred)
                     if filter_trade_ideas and _looks_like_trade_idea(text):
                         continue
                     provider = a.get("meta", {}).get("provider", "O")
-                    sources = it.get("sources", [])
-                    if not sources:
-                        sources = [provider]
-                    out.append({
-                        "text": text,
-                        "sources": sorted(set(sources)),
-                        "products": sorted(set(article_products))
-                    })
+                    sources = it.get("sources", []) or [provider]
+                    prods = _resolve_bullet_products(it, text, article_products, section)
+                    out.append({"text": text, "sources": sorted(set(sources)), "products": prods})
                 elif isinstance(it, str):
                     text = it
                     if filter_trade_ideas and _looks_like_trade_idea(text):
                         continue
                     provider = a.get("meta", {}).get("provider", "O")
-                    out.append({
-                        "text": text,
-                        "sources": [provider],
-                        "products": sorted(set(article_products))
-                    })
+                    prods = _resolve_bullet_products({"text": text}, text, article_products, section)
+                    out.append({"text": text, "sources": [provider], "products": prods})
+        out = _dedupe_bullets(out)
         return out[:limit]
-    
-    # Helper to gather and group by product for observations/forward_watch
+
     def gather_grouped(section: str, limit: int = 30) -> Dict[str, List[dict]]:
         items = gather(section, limit=limit, filter_trade_ideas=(section == "what_occurred"))
         return _group_by_product(items)
@@ -342,7 +438,7 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "providers": providers,
             "products": products,
             "generated_at_iso": _iso_now(),
-            "model": None,  # optional if you use an LLM for narrative synthesis
+            "model": _model_from_articles(article_sum_jsons),
         },
         "ui": {
             "title": f"{_format_date_human(date_obj)} Daily Recap",
@@ -405,8 +501,8 @@ def build_weekly_rollup(start_date: dt.date, end_date: dt.date, article_sum_json
     # Get ISO week info
     iso_year, iso_week, _ = start_date.isocalendar()
 
-    # aggregate bullets - returns list of dicts with text, sources, products
     def gather(section: str, limit: int = 30, filter_trade_ideas: bool = False) -> List[dict]:
+        """Gather bullets; never default to ALL_PRODUCTS. products=[] → General."""
         out = []
         for a in article_sum_jsons:
             article_products = a.get("meta", {}).get("products", []) or []
@@ -414,31 +510,22 @@ def build_weekly_rollup(start_date: dt.date, end_date: dt.date, article_sum_json
             for it in items:
                 if isinstance(it, dict) and it.get("text"):
                     text = it["text"]
-                    # Filter out trade ideas if requested (for observations/what_occurred)
                     if filter_trade_ideas and _looks_like_trade_idea(text):
                         continue
                     provider = a.get("meta", {}).get("provider", "O")
-                    sources = it.get("sources", [])
-                    if not sources:
-                        sources = [provider]
-                    out.append({
-                        "text": text,
-                        "sources": sorted(set(sources)),
-                        "products": sorted(set(article_products))
-                    })
+                    sources = it.get("sources", []) or [provider]
+                    prods = _resolve_bullet_products(it, text, article_products, section)
+                    out.append({"text": text, "sources": sorted(set(sources)), "products": prods})
                 elif isinstance(it, str):
                     text = it
                     if filter_trade_ideas and _looks_like_trade_idea(text):
                         continue
                     provider = a.get("meta", {}).get("provider", "O")
-                    out.append({
-                        "text": text,
-                        "sources": [provider],
-                        "products": sorted(set(article_products))
-                    })
+                    prods = _resolve_bullet_products({"text": text}, text, article_products, section)
+                    out.append({"text": text, "sources": [provider], "products": prods})
+        out = _dedupe_bullets(out)
         return out[:limit]
-    
-    # Helper to gather and group by product for observations/forward_watch
+
     def gather_grouped(section: str, limit: int = 30) -> Dict[str, List[dict]]:
         items = gather(section, limit=limit, filter_trade_ideas=(section == "what_occurred"))
         return _group_by_product(items)
@@ -486,7 +573,7 @@ def build_weekly_rollup(start_date: dt.date, end_date: dt.date, article_sum_json
             "providers": providers,
             "products": products,
             "generated_at_iso": _iso_now(),
-            "model": None,
+            "model": _model_from_articles(article_sum_jsons),
         },
         "ui": {
             "title": f"Week of {start_date.strftime('%B %d')} Weekly Recap",

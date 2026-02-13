@@ -48,7 +48,7 @@ def test_full_summarization():
         print("RUNNING SUMMARIZATION...")
         print("-" * 80)
         
-        summary = summarize_pdf(test_pdf, generate_pdf=False)  # Skip PDF gen for speed
+        summary, json_path = summarize_pdf(test_pdf, generate_pdf=False)  # Skip PDF gen for speed
         
         if summary:
             print()

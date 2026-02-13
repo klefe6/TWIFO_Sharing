@@ -1,0 +1,87 @@
+/* TWIFO Daily View Styles */
+
+/* Daily article button hover effects */
+.daily-article-button:hover {
+    background-color: #f8f9fa !important;
+    border-color: #007bff !important;
+    transform: translateX(3px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.daily-article-button:active {
+    transform: translateX(1px);
+}
+
+/* Daily summary button hover (different style) */
+button[id*="daily-summary"]:hover {
+    background-color: #bbdefb !important;
+    border-color: #42a5f5 !important;
+    box-shadow: 0 3px 6px rgba(0, 123, 255, 0.2);
+}
+
+/* Sidebar scrollbar styling */
+#daily-view-sidebar::-webkit-scrollbar {
+    width: 8px;
+}
+
+#daily-view-sidebar::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+#daily-view-sidebar::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+
+#daily-view-sidebar::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Main content panel scrollbar */
+#daily-view-main::-webkit-scrollbar {
+    width: 10px;
+}
+
+#daily-view-main::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 5px;
+}
+
+#daily-view-main::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 5px;
+}
+
+#daily-view-main::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Responsive adjustments for smaller screens */
+@media (max-width: 768px) {
+    #daily-view-sidebar {
+        width: 250px !important;
+        min-width: 250px !important;
+    }
+}
+
+@media (max-width: 576px) {
+    #daily-view-container > div {
+        flex-direction: column !important;
+    }
+    
+    #daily-view-sidebar {
+        width: 100% !important;
+        min-width: 100% !important;
+        border-right: none !important;
+        border-bottom: 1px solid #ddd;
+        padding-right: 0 !important;
+        padding-bottom: 15px;
+        margin-bottom: 15px;
+        max-height: 300px;
+    }
+    
+    #daily-view-main {
+        padding-left: 0 !important;
+    }
+}

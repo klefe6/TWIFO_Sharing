@@ -1,6 +1,6 @@
 @echo off
 REM ─── Configuration ─────────────────────────────────────────────
-set "PROJECT_ROOT=C:\Program Files\Coding Projects\HomePage"
+set "PROJECT_ROOT=C:\Coding Projects\HomePage"
 set "VENV=%PROJECT_ROOT%\.venv13"
 set "PY=%VENV%\Scripts\python.exe"
 

@@ -296,7 +296,7 @@ def main() -> None:
         from summarize_pdf import summarize_pdf, create_summary_file
         
         print(f"[INFO] Generating summary for {PDF_PATH.name}...")
-        summary = summarize_pdf(PDF_PATH, max_pages=MAX_PAGES)
+        summary, json_path = summarize_pdf(PDF_PATH, max_pages=MAX_PAGES)
         
         if summary:
             summary_file = create_summary_file(PDF_PATH, summary)

@@ -8,6 +8,7 @@ Last Updated: 2026-01-11
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -44,6 +45,20 @@ def validate_rollup(rollup: Dict[str, Any]) -> tuple[bool, List[str]]:
     rollup_kind = meta.get("rollup_kind")
     if rollup_kind not in ["daily", "weekly"]:
         errors.append(f"Invalid meta.rollup_kind: {rollup_kind}")
+
+    # meta.generated_at_iso must be timezone-aware (Z or +/-HH:MM)
+    generated_at = meta.get("generated_at_iso", "")
+    if not generated_at:
+        errors.append("Missing meta.generated_at_iso")
+    elif not (generated_at.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", generated_at)):
+        errors.append(f"meta.generated_at_iso must be timezone-aware (end with Z or +/-HH:MM): got {generated_at}")
+
+    # meta.model must be non-empty string (never null)
+    model = meta.get("model")
+    if model is None:
+        errors.append("meta.model must not be null")
+    elif not (isinstance(model, str) and model.strip()):
+        errors.append(f"meta.model must be non-empty string: got {model!r}")
     
     if rollup_kind == "weekly":
         required_weekly = ["start_date", "end_date", "week_range", "iso_year", "iso_week"]

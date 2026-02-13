@@ -1,0 +1,14 @@
+
+===== QUALITY GATE FAILURE (ATTEMPT 1) =====
+model: gpt-4o-mini
+quality_reason: too_few_unique_bullets: only 0 unique bullets found
+bullet_counts: {"what_moved_today": 0, "what_can_move_tomorrow": 0, "trade_ideas": 0, "tldr": 0, "what_occurred": 0, "forward_watch": 0, "warnings": 0, "tips_reminders": 0, "cross_asset_impacts": 0, "scenarios": 0}
+raw_output:
+
+
+===== QUALITY GATE FAILURE (ATTEMPT 2) =====
+model: gpt-4o
+quality_reason: too_few_unique_bullets: only 0 unique bullets found
+bullet_counts: {"what_moved_today": 0, "what_can_move_tomorrow": 0, "trade_ideas": 0, "tldr": 0, "what_occurred": 0, "forward_watch": 0, "warnings": 0, "tips_reminders": 0, "cross_asset_impacts": 0, "scenarios": 0}
+raw_output:
+

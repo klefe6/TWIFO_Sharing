@@ -1,0 +1,422 @@
+/*
+ * TWIFO Modern Finance Dashboard Styling
+ * Purpose: Modern typography, spacing, and DataTable aesthetics
+ * Author: Kevin Lefebvre
+ * Last Updated: 2026-02-12
+ */
+
+/* ==================== FONTS ==================== */
+
+/* Import Inter font from Google Fonts with fallback */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* Global font stack with system fallbacks */
+* {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==================== GLOBAL TYPOGRAPHY ==================== */
+
+body {
+    font-size: 14px;
+    line-height: 1.6;
+    color: #1f2937;
+    letter-spacing: -0.01em;
+    background-color: #f9fafb;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.75em;
+    color: #111827;
+}
+
+h1 {
+    font-size: 2rem;
+    font-weight: 700;
+}
+
+h2 {
+    font-size: 1.5rem;
+}
+
+h3 {
+    font-size: 1.25rem;
+}
+
+/* ==================== BUTTON STYLING ==================== */
+
+button, .btn {
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 6px;
+    padding: 8px 16px;
+}
+
+button:hover, .btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+button:active, .btn:active {
+    transform: translateY(0);
+}
+
+.btn-primary {
+    background-color: #004080;
+    border-color: #004080;
+}
+
+.btn-primary:hover {
+    background-color: #003366;
+    border-color: #003366;
+}
+
+.btn-outline-primary {
+    color: #004080;
+    border-color: #004080;
+}
+
+.btn-outline-primary:hover {
+    background-color: #004080;
+    color: white;
+}
+
+.btn-outline-secondary {
+    color: #6b7280;
+    border-color: #d1d5db;
+}
+
+.btn-outline-secondary:hover {
+    background-color: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
+/* ==================== INPUT STYLING ==================== */
+
+input[type="text"], input[type="password"] {
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    padding: 8px 12px;
+    font-size: 14px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input[type="text"]:focus, input[type="password"]:focus {
+    outline: none;
+    border-color: #004080;
+    box-shadow: 0 0 0 3px rgba(0, 64, 128, 0.1);
+}
+
+/* ==================== LAYOUT & CONTAINERS ==================== */
+
+#files-section {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 40px 30px !important;
+    background-color: #f9fafb !important;
+}
+
+/* Provider checklist container */
+.provider-checklist-wrapper {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    padding: 20px !important;
+}
+
+.provider-checklist-wrapper > div {
+    column-count: 3;
+    column-gap: 1.5em;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+/* Search bar container */
+.search-controls-wrapper {
+    background-color: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+    padding: 20px !important;
+}
+
+/* Table container */
+.table-container {
+    background-color: #ffffff;
+    border-radius: 10px;
+    padding: 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* ==================== DATATABLE STYLING ==================== */
+
+/* Table container */
+.dash-table-container {
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: none;
+    border: 1px solid #e5e7eb;
+    background-color: #ffffff;
+}
+
+/* Header row */
+.dash-header {
+    font-weight: 600 !important;
+    font-size: 12px !important;
+    letter-spacing: 0.05em !important;
+    text-transform: uppercase !important;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.3) !important;
+    background-color: #004080 !important;
+}
+
+.dash-header-cell {
+    padding: 16px 12px !important;
+    color: #ffffff !important;
+}
+
+/* Data cells */
+.dash-cell {
+    padding: 14px 12px !important;
+    font-size: 13px !important;
+    border-bottom: 1px solid #f3f4f6 !important;
+    line-height: 1.5 !important;
+}
+
+/* Row hover effect */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner table tbody tr:hover {
+    background-color: #f8fafc !important;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+/* Remove default borders */
+.dash-spreadsheet {
+    border: none !important;
+}
+
+.dash-spreadsheet-inner {
+    border: none !important;
+}
+
+.dash-spreadsheet-container {
+    border-radius: 10px;
+}
+
+/* Filter row styling */
+.dash-filter {
+    background-color: #f9fafb !important;
+    border-bottom: 2px solid #e5e7eb !important;
+}
+
+.dash-filter input {
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+    transition: all 0.2s ease !important;
+}
+
+.dash-filter input:focus {
+    outline: none !important;
+    border-color: #004080 !important;
+    box-shadow: 0 0 0 3px rgba(0, 64, 128, 0.1) !important;
+}
+
+/* Pagination styling */
+.dash-table-container .previous-next-container {
+    padding: 16px !important;
+    border-top: 1px solid #e5e7eb !important;
+}
+
+.dash-table-container .previous-next-container button {
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    border: 1px solid #d1d5db !important;
+    padding: 6px 12px !important;
+    transition: all 0.2s ease !important;
+}
+
+.dash-table-container .previous-next-container button:hover {
+    background-color: #f3f4f6 !important;
+    border-color: #9ca3af !important;
+}
+
+.dash-table-container .page-number {
+    font-weight: 600 !important;
+    color: #004080 !important;
+    padding: 0 12px !important;
+}
+
+/* Dropdown menu styling */
+.Select-control {
+    border-radius: 6px !important;
+}
+
+.Select-menu-outer {
+    border-radius: 6px !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Loading spinner */
+._dash-loading {
+    opacity: 0.7;
+}
+
+/* ==================== DATE PICKER STYLING ==================== */
+
+.DateInput {
+    border-radius: 6px !important;
+}
+
+.DateInput_input {
+    font-size: 13px !important;
+    padding: 8px 12px !important;
+    border-radius: 6px !important;
+}
+
+/* ==================== PROGRESS BAR STYLING ==================== */
+
+.progress {
+    border-radius: 8px !important;
+    background-color: #e5e7eb !important;
+}
+
+.progress-bar {
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+}
+
+/* ==================== LOGIN SECTION ==================== */
+
+#login-section {
+    background: linear-gradient(135deg, #f7f9fa 0%, #e9ecef 100%);
+}
+
+#login-section > div {
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* ==================== ARTICLE COUNTER ==================== */
+
+#article-counter {
+    font-weight: 600 !important;
+    color: #111827 !important;
+    font-size: 15px !important;
+    background-color: #f0f9ff;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid #bfdbfe;
+}
+
+/* ==================== CHECKLIST STYLING ==================== */
+
+/* Checklist items */
+input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #004080;
+}
+
+/* Checklist labels */
+.provider-checklist-wrapper label {
+    cursor: pointer;
+    padding: 4px 0;
+    transition: color 0.2s ease;
+    font-size: 14px;
+    color: #374151;
+}
+
+.provider-checklist-wrapper label:hover {
+    color: #004080;
+}
+
+/* ==================== SEARCH INPUT ENHANCEMENTS ==================== */
+
+#title-search-input,
+#content-search-input {
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    padding: 10px 14px !important;
+    font-size: 14px !important;
+    transition: all 0.2s ease !important;
+}
+
+#title-search-input:focus,
+#content-search-input:focus {
+    outline: none !important;
+    border-color: #004080 !important;
+    box-shadow: 0 0 0 3px rgba(0, 64, 128, 0.1) !important;
+}
+
+/* ==================== RESPONSIVE TWEAKS ==================== */
+
+@media (max-width: 1200px) {
+    #files-section {
+        padding: 30px 20px !important;
+    }
+}
+
+@media (max-width: 768px) {
+    #files-section {
+        padding: 20px 15px !important;
+    }
+    
+    h1 {
+        font-size: 1.5rem;
+    }
+    
+    .dash-cell {
+        font-size: 12px !important;
+        padding: 10px !important;
+    }
+}
+
+/* ==================== MARKDOWN CELL STYLING ==================== */
+
+/* Style for View and Summary markdown columns */
+.dash-cell-value a {
+    color: #004080;
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.2s ease;
+}
+
+.dash-cell-value a:hover {
+    color: #003366;
+    text-decoration: underline;
+}
+
+/* ==================== SCROLLBAR STYLING ==================== */
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}

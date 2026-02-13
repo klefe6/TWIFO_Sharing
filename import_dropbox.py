@@ -15,6 +15,7 @@ import re
 import datetime
 from datetime import timedelta
 import os
+from pathlib import Path
 import dropbox
 from dropbox.files import FolderMetadata, FileMetadata
 from dropbox.exceptions import ApiError
@@ -375,15 +376,31 @@ if "df" in st.session_state and not st.session_state.df.empty:
     export_dir = os.path.expanduser(
         r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE"
     )
-    os.makedirs(export_dir, exist_ok=True)
+    
+    # Use path manager to organize files
+    try:
+        from path_manager import get_path_manager
+        pm = get_path_manager(Path(export_dir))
+        use_path_manager = True
+    except ImportError:
+        use_path_manager = False
+        os.makedirs(export_dir, exist_ok=True)
+    
     if st.button("Download all remaining rows", key="download"):
         dbx = dropbox.Dropbox(token.strip())
         for _, row in st.session_state.df.iterrows():
             src = row["path_lower"]   # ← use the exact Dropbox path you stored
             st.write("→ downloading from:", src)
-            dst = os.path.join(export_dir, row["suggested_name"])
+            
+            # Save to originals/ if using path manager
+            if use_path_manager:
+                dst = pm.original_pdf_path(row["suggested_name"])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                dst = os.path.join(export_dir, row["suggested_name"])
+            
             try:
-                dbx.files_download_to_file(dst, src)
+                dbx.files_download_to_file(str(dst), src)
             except ApiError as e:
                 st.error(f"Failed to download {src}: {e}")
         st.success("Download pass complete.")

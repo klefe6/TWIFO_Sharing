@@ -2,6 +2,28 @@
 
 A comprehensive research document management and sharing system with advanced Dropbox integration, developed by Hughes & Company LLC. This sophisticated platform provides secure access to internal research materials, intelligent document categorization, and powerful search capabilities across multiple research sources.
 
+## Important: Module Rename (February 2026)
+
+**TWIFO's internal prompt module has been renamed** to avoid collision with the reusable `summary` package:
+
+- **Old:** `summary/prompts/article_prompts.py`  
+- **New:** `twifo_prompts/prompts/article_prompts.py`
+
+**Why:** The reusable `summary` package (installed via `pip install -e ../summary`) provides generic transcript summarization. TWIFO's article-specific prompts live in `twifo_prompts/` to avoid import shadowing.
+
+**All imports updated:**
+```python
+# Old (DO NOT USE)
+from summary.prompts import article_prompts
+
+# New (CORRECT)
+from twifo_prompts.prompts import article_prompts
+```
+
+See verification script: `python test_module_imports.py`
+
+---
+
 ## Overview
 
 The Dropbox Material Management system is a professional-grade platform that enables secure access to internal research documents through an intelligent web interface. It features advanced document categorization, full-text PDF search capabilities, and seamless Dropbox integration for research material management. The system serves as a centralized hub for accessing research from major financial institutions and research providers.
