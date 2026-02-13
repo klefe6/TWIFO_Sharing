@@ -1,5 +1,10 @@
 /* TWIFO Daily View Styles */
 
+/* Daily article button base styles */
+.daily-article-button {
+    padding: 12px !important;
+}
+
 /* Daily article button hover effects */
 .daily-article-button:hover {
     background-color: #f8f9fa !important;
@@ -10,6 +15,44 @@
 
 .daily-article-button:active {
     transform: translateX(1px);
+}
+
+/* Three-line card layout */
+.daily-article-button > div:first-child {
+    /* Firm line container */
+    margin-bottom: 4px !important;
+}
+
+.daily-article-button > div:first-child > span:first-child {
+    /* Firm name text */
+    font-weight: bold !important;
+}
+
+.daily-article-button > div:nth-child(2) {
+    /* Title line */
+    display: -webkit-box !important;
+    -webkit-line-clamp: 2 !important;
+    -webkit-box-orient: vertical !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    line-height: 1.3 !important;
+    margin-bottom: 3px !important;
+}
+
+.daily-article-button > div:nth-child(3) {
+    /* Products line */
+    display: block !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    line-height: 1.2 !important;
+}
+
+/* JSON badge positioning (already handled inline, but ensure it stays top-right) */
+.daily-article-button > div:first-child > span:last-child {
+    /* Badge stays on the right */
+    flex-shrink: 0 !important;
+    margin-left: 8px !important;
 }
 
 /* Daily summary button hover (different style) */

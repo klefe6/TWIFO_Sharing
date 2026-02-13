@@ -2910,11 +2910,16 @@ def populate_daily_view_sidebar(login_status, active_tab):
         ]
 
     # --- build sidebar buttons keyed by artifact_folder ---
+    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    day = yesterday.day
+    suffix = "th" if 10 <= day % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    yesterday_label = f"{yesterday.strftime('%B')} {day}{suffix}"
+    summary_title = f"Summary for {yesterday_label} & Prep for Today"
     sidebar_buttons = [
         html.Button(
             [
                 html.Div(
-                    "Daily Summary",
+                    summary_title,
                     style={"fontWeight": "bold", "marginBottom": "3px"}
                 ),
                 html.Div(
@@ -2946,6 +2951,9 @@ def populate_daily_view_sidebar(login_status, active_tab):
         )
     ]
 
+    # Debug counter
+    debug_count = 0
+    
     for art in artifacts:
         # Availability badge
         if art["has_sum_json"]:
@@ -2958,23 +2966,74 @@ def populate_daily_view_sidebar(login_status, active_tab):
             badge_text = "—"
             badge_color = "#999"
 
+        # Extract products from sum.json if available
+        products_display = ""
+        if art["has_sum_json"]:
+            try:
+                with open(art["sum_json_path"], "r", encoding="utf-8") as fh:
+                    sum_data = json.load(fh)
+                    products = sum_data.get("products", [])
+                    if products:
+                        products_display = ", ".join(products) if isinstance(products, list) else str(products)
+            except Exception:
+                pass  # leave blank if can't access
+
+        # Extract firm from title prefix (art["provider"] is often "O" for Others)
+        # Title format: "GM_Commodity Analyst_20260211_u"
+        # Extract "GM" before first underscore, look up "GM_" in PREFIX_MAP
+        title_raw = art["title"]
+        firm_extracted = None
+        firm_name = art["provider"]  # fallback
+        title_working = title_raw
+        
+        if "_" in title_raw:
+            # Split on first underscore
+            parts = title_raw.split("_", 1)
+            potential_code = parts[0]
+            
+            # Try to look up in PREFIX_MAP
+            firm_key = f"{potential_code}_"
+            if firm_key in PREFIX_MAP:
+                firm_extracted = potential_code
+                firm_name = PREFIX_MAP[firm_key]
+                # Remove firm prefix from title
+                title_working = parts[1] if len(parts) > 1 else title_raw
+        
+        # Clean title - remove trailing date/frequency tokens
+        # Remove _YYYYMMDD (8-digit dates), _u/_w/_d/_m, and frequency words
+        title_cleaned = re.sub(r'_\d{8}', '', title_working)  # Remove _20260211
+        title_cleaned = re.sub(r'[_\-]?(u|w|d|m)$', '', title_cleaned)  # Remove trailing _u, _w, etc.
+        title_cleaned = re.sub(r'\s*[_\-]?\s*(daily|weekly|monthly)\s*$', '', title_cleaned, flags=re.IGNORECASE)
+        title_cleaned = title_cleaned.strip("_").strip()
+
+        # Debug first 3 articles
+        if debug_count < 3:
+            print(f"\n[DAILY VIEW DEBUG] Article {debug_count + 1}:")
+            print(f"  title_raw: {title_raw}")
+            print(f"  firm_extracted (from title): {firm_extracted}")
+            print(f"  firm_name (after PREFIX_MAP): {firm_name}")
+            print(f"  title_cleaned: {title_cleaned}")
+            print(f"  products: {products_display}")
+            debug_count += 1
+
         sidebar_buttons.append(
             html.Button(
                 [
+                    # Line 1: Firm name with badge
                     html.Div(
                         style={
                             "display": "flex",
                             "justifyContent": "space-between",
                             "alignItems": "center",
-                            "marginBottom": "3px"
+                            "marginBottom": "4px"
                         },
                         children=[
                             html.Span(
-                                art["provider"],
+                                firm_name,
                                 style={
                                     "fontSize": "11px",
                                     "color": "#666",
-                                    "fontWeight": "500"
+                                    "fontWeight": "bold"
                                 }
                             ),
                             html.Span(
@@ -2989,18 +3048,33 @@ def populate_daily_view_sidebar(login_status, active_tab):
                             )
                         ]
                     ),
+                    # Line 2: Article title
                     html.Div(
-                        art["title"],
+                        title_cleaned,
                         style={
                             "fontSize": "13px",
                             "lineHeight": "1.3",
+                            "fontWeight": "500",
+                            "marginBottom": "3px",
                             "overflow": "hidden",
                             "textOverflow": "ellipsis",
                             "display": "-webkit-box",
                             "WebkitLineClamp": "2",
                             "WebkitBoxOrient": "vertical"
                         }
-                    )
+                    ),
+                    # Line 3: Products (if available)
+                    html.Div(
+                        products_display,
+                        style={
+                            "fontSize": "11px",
+                            "color": "#999",
+                            "lineHeight": "1.2",
+                            "overflow": "hidden",
+                            "textOverflow": "ellipsis",
+                            "whiteSpace": "nowrap"
+                        }
+                    ) if products_display else html.Div()
                 ],
                 id={
                     "type": "daily-article-btn",
