@@ -51,14 +51,48 @@ PREFIX_MAP = {
     "STI_":   "Stifel",
     "TME_":   "TME",
     "UBS_":   "UBS",
+    "O_":     "Others",
 }
 
 
+def _parse_folder_segments(folder_name: str) -> dict:
+    """
+    Parse artifact folder name into segments.
+
+    Format: YYYYMMDD__PROVIDER__title_slug__hash
+    Example: 20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa
+
+    Returns:
+        dict with keys: date_part, provider_code, slug, hash_part
+    """
+    parts = folder_name.split("__")
+    if len(parts) >= 3:
+        return {
+            "date_part": parts[0],
+            "provider_code": parts[1],
+            "slug": parts[2] if len(parts) > 2 else "",
+            "hash_part": parts[3] if len(parts) > 3 else "",
+        }
+    # Fallback for unexpected format
+    return {
+        "date_part": "",
+        "provider_code": "",
+        "slug": folder_name,
+        "hash_part": "",
+    }
+
+
 def _detect_provider(folder_name: str) -> str:
-    """Detect human-readable provider name from a folder/file name prefix."""
-    for prefix, name in PREFIX_MAP.items():
-        if folder_name.startswith(prefix):
-            return name
+    """Detect human-readable provider name from artifact folder name."""
+    seg = _parse_folder_segments(folder_name)
+    code = seg["provider_code"]
+    if code:
+        # Look up "GM_" in PREFIX_MAP for provider code "GM"
+        mapped = PREFIX_MAP.get(f"{code}_")
+        if mapped:
+            return mapped
+        # Code itself might already be a full name or unmapped code
+        return code
     return "Unknown"
 
 
@@ -66,35 +100,37 @@ def _title_from_folder(folder_name: str) -> str:
     """
     Derive a human-readable title from an artifact folder name.
 
-    Strips the leading provider prefix and trailing date/suffix tokens,
-    replaces underscores with spaces, and title-cases the result.
+    Format: YYYYMMDD__PROVIDER__title_slug__hash
+    Extracts the slug segment, strips the provider prefix, date, and
+    frequency suffix, then title-cases.
     """
-    # Remove provider prefix
-    cleaned = folder_name
-    for prefix in PREFIX_MAP:
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):]
-            break
+    seg = _parse_folder_segments(folder_name)
+    slug = seg["slug"]
+    provider_code = seg["provider_code"].lower()
 
-    # Remove date token (YYYYMMDD) that may appear at the start
-    cleaned = re.sub(r"^\d{8}_?", "", cleaned)
+    if not slug:
+        return folder_name
 
-    # Remove common trailing suffixes
-    for suffix in ("_w", "_d", "_m"):
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
-            break
+    # Remove leading provider code from slug (e.g., "gm_commodity..." → "commodity...")
+    if provider_code and slug.lower().startswith(f"{provider_code}_"):
+        slug = slug[len(provider_code) + 1:]
+
+    # Remove embedded date tokens (YYYYMMDD)
+    slug = re.sub(r"_?\d{8}", "", slug)
+
+    # Remove trailing frequency suffixes (_w, _d, _m, _u, _q)
+    slug = re.sub(r"[_\-]([wdmuq])$", "", slug)
 
     # Underscore → space, collapse whitespace, title-case
-    title = cleaned.replace("_", " ").strip()
+    title = slug.replace("_", " ").replace("-", " ").strip()
+    title = re.sub(r"\s+", " ", title)
     return title.title() if title else folder_name
 
 
 def get_yesterday_artifacts() -> List[Dict]:
     """
-    Scan ARTIFACTS_DIR for artifact folders whose names start with
-    yesterday's YYYYMMDD date prefix and return structured metadata.
-
+    Scan ARTIFACTS_DIR for artifact folders from yesterday and return structured metadata.
+    
     Returns:
         List of dicts with keys:
             artifact_folder  – folder name (stable identifier)
@@ -106,14 +142,27 @@ def get_yesterday_artifacts() -> List[Dict]:
             sum_json_path    – str path or ""
             sum_pdf_path     – str path or ""
     """
+    yesterday = date.today() - timedelta(days=1)
+    return get_artifacts_for_date(yesterday)
+
+
+def get_artifacts_for_date(target_date: date) -> List[Dict]:
+    """
+    Scan ARTIFACTS_DIR for artifact folders matching a specific date.
+    
+    Args:
+        target_date: The date to search for (as date object)
+    
+    Returns:
+        List of dicts with artifact metadata
+    """
     debug = os.getenv("TWIFO_DEBUG_DAILY_VIEW")
 
-    yesterday = date.today() - timedelta(days=1)
-    date_str = yesterday.strftime("%Y%m%d")
-    date_fmt = yesterday.strftime("%Y-%m-%d")
+    date_str = target_date.strftime("%Y%m%d")
+    date_fmt = target_date.strftime("%Y-%m-%d")
 
     if debug:
-        print(f"[DEBUG daily_view] Yesterday: {date_fmt} ({date_str})")
+        print(f"[DEBUG daily_view] Target date: {date_fmt} ({date_str})")
 
     if not ARTIFACTS_DIR.is_dir():
         if debug:

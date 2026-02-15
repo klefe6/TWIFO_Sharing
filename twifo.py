@@ -31,12 +31,13 @@ except ImportError as e:
 
 # Import daily view helper
 try:
-    from twifo_app import get_yesterday_artifacts
+    from twifo_app import get_yesterday_artifacts, get_artifacts_for_date
     DAILY_VIEW_AVAILABLE = True
 except ImportError as e:
     print(f"[WARN] Daily view helper not available: {e}")
     DAILY_VIEW_AVAILABLE = False
     get_yesterday_artifacts = None
+    get_artifacts_for_date = None
 
 # compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
@@ -80,6 +81,7 @@ PREFIX_MAP = {
     "STI_":   "Stifel",
     "TME_":   "TME",
     "UBS_":   "UBS",
+    "O_":     "Others",
 }
 
 # ── product list & names ──
@@ -1723,6 +1725,7 @@ app.layout = html.Div([
     # Stores for daily view
     dcc.Store(id='daily-articles-store', data=[]),
     dcc.Store(id='daily-selected-artifact', data=""),
+    dcc.Store(id='daily-selected-date', data=None),  # Stores selected date as YYYY-MM-DD string
     
     # Location for navigation
     dcc.Location(id='url', refresh=True),
@@ -1884,12 +1887,58 @@ app.layout = html.Div([
                                                     "paddingRight": "15px"
                                                 },
                                                 children=[
-                                                    html.H3(
-                                                        "Yesterday's Articles",
+                                                    html.Div(
                                                         style={
-                                                            "marginBottom": "15px",
-                                                            "color": HEADER_BG_COLOR
-                                                        }
+                                                            "display": "flex",
+                                                            "justifyContent": "space-between",
+                                                            "alignItems": "center",
+                                                            "marginBottom": "15px"
+                                                        },
+                                                        children=[
+                                                            html.H3(
+                                                                "Articles",
+                                                                style={
+                                                                    "margin": "0",
+                                                                    "color": HEADER_BG_COLOR
+                                                                }
+                                                            ),
+                                                            html.Div(
+                                                                style={
+                                                                    "display": "flex",
+                                                                    "gap": "5px",
+                                                                    "alignItems": "center"
+                                                                },
+                                                                children=[
+                                                                    dcc.Input(
+                                                                        id='daily-view-date-input',
+                                                                        type='text',
+                                                                        placeholder='YYYY-MM-DD',
+                                                                        value=(datetime.date.today() - datetime.timedelta(days=1)).isoformat(),
+                                                                        style={
+                                                                            "width": "110px",
+                                                                            "padding": "4px 8px",
+                                                                            "fontSize": "13px",
+                                                                            "border": "1px solid #ddd",
+                                                                            "borderRadius": "4px"
+                                                                        }
+                                                                    ),
+                                                                    html.Button(
+                                                                        "OK",
+                                                                        id="daily-view-date-ok",
+                                                                        n_clicks=0,
+                                                                        style={
+                                                                            "padding": "4px 12px",
+                                                                            "fontSize": "13px",
+                                                                            "backgroundColor": "#007bff",
+                                                                            "color": "white",
+                                                                            "border": "none",
+                                                                            "borderRadius": "4px",
+                                                                            "cursor": "pointer"
+                                                                        }
+                                                                    )
+                                                                ]
+                                                            )
+                                                        ]
                                                     ),
                                                     html.Div(id="daily-view-article-list")
                                                 ]
@@ -2863,15 +2912,17 @@ def display_page(pathname):
     ],
     [
         Input("login-status", "data"),
-        Input("main-tabs", "value")
+        Input("main-tabs", "value"),
+        Input("daily-view-date-ok", "n_clicks")
     ],
+    State("daily-view-date-input", "value"),
     prevent_initial_call=False
 )
-def populate_daily_view_sidebar(login_status, active_tab):
+def populate_daily_view_sidebar(login_status, active_tab, n_clicks, date_input):
     """
-    Populate the Daily View sidebar from artifact folders.
+    Populate the Daily View sidebar from artifact folders for the selected date.
 
-    Only calls get_yesterday_artifacts() when the user is logged in
+    Only calls get_artifacts_for_date() when the user is logged in
     AND the active tab is 'daily-view'.
     """
     if not DAILY_VIEW_AVAILABLE:
@@ -2885,10 +2936,20 @@ def populate_daily_view_sidebar(login_status, active_tab):
     if not login_status or active_tab != "daily-view":
         return [], []
 
+    # Parse date input (YYYY-MM-DD format)
+    # Default to yesterday if empty or invalid
+    if date_input and date_input.strip():
+        try:
+            target_date = datetime.datetime.strptime(date_input.strip(), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            target_date = datetime.date.today() - datetime.timedelta(days=1)
+    else:
+        target_date = datetime.date.today() - datetime.timedelta(days=1)
+
     try:
-        artifacts = get_yesterday_artifacts()
+        artifacts = get_artifacts_for_date(target_date)
     except Exception as e:
-        print(f"[ERROR] get_yesterday_artifacts failed: {e}")
+        print(f"[ERROR] get_artifacts_for_date failed: {e}")
         return [], [
             html.P(
                 f"Error loading artifacts: {e}",
@@ -2899,7 +2960,7 @@ def populate_daily_view_sidebar(login_status, active_tab):
     if not artifacts:
         return [], [
             html.P(
-                "No articles found for yesterday.",
+                f"No articles found for {target_date.strftime('%B %d, %Y')}.",
                 style={
                     "color": "#999",
                     "fontStyle": "italic",
@@ -2910,11 +2971,11 @@ def populate_daily_view_sidebar(login_status, active_tab):
         ]
 
     # --- build sidebar buttons keyed by artifact_folder ---
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    day = yesterday.day
+    # Format the date for the summary title
+    day = target_date.day
     suffix = "th" if 10 <= day % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-    yesterday_label = f"{yesterday.strftime('%B')} {day}{suffix}"
-    summary_title = f"Summary for {yesterday_label} & Prep for Today"
+    date_label = f"{target_date.strftime('%B')} {day}{suffix}"
+    summary_title = f"Summary for {date_label} & Prep for Today"
     sidebar_buttons = [
         html.Button(
             [
@@ -2955,24 +3016,13 @@ def populate_daily_view_sidebar(login_status, active_tab):
     debug_count = 0
     
     for art in artifacts:
-        # Availability badge
-        if art["has_sum_json"]:
-            badge_text = "JSON"
-            badge_color = "#28a745"
-        elif art["has_sum_pdf"]:
-            badge_text = "PDF"
-            badge_color = "#007bff"
-        else:
-            badge_text = "—"
-            badge_color = "#999"
-
         # Extract products from sum.json if available
         products_display = ""
         if art["has_sum_json"]:
             try:
                 with open(art["sum_json_path"], "r", encoding="utf-8") as fh:
                     sum_data = json.load(fh)
-                    products = sum_data.get("products", [])
+                    products = sum_data.get("meta", {}).get("products", [])
                     if products:
                         products_display = ", ".join(products) if isinstance(products, list) else str(products)
             except Exception:
@@ -3002,7 +3052,7 @@ def populate_daily_view_sidebar(login_status, active_tab):
         # Clean title - remove trailing date/frequency tokens
         # Remove _YYYYMMDD (8-digit dates), _u/_w/_d/_m, and frequency words
         title_cleaned = re.sub(r'_\d{8}', '', title_working)  # Remove _20260211
-        title_cleaned = re.sub(r'[_\-]?(u|w|d|m)$', '', title_cleaned)  # Remove trailing _u, _w, etc.
+        title_cleaned = re.sub(r'[_\-]?(u|w|d|m|q)$', '', title_cleaned)  # Remove trailing _u, _w, _d, _m, _q
         title_cleaned = re.sub(r'\s*[_\-]?\s*(daily|weekly|monthly)\s*$', '', title_cleaned, flags=re.IGNORECASE)
         title_cleaned = title_cleaned.strip("_").strip()
 
@@ -3019,34 +3069,15 @@ def populate_daily_view_sidebar(login_status, active_tab):
         sidebar_buttons.append(
             html.Button(
                 [
-                    # Line 1: Firm name with badge
+                    # Line 1: Firm name
                     html.Div(
+                        firm_name,
                         style={
-                            "display": "flex",
-                            "justifyContent": "space-between",
-                            "alignItems": "center",
+                            "fontSize": "11px",
+                            "color": "#666",
+                            "fontWeight": "bold",
                             "marginBottom": "4px"
-                        },
-                        children=[
-                            html.Span(
-                                firm_name,
-                                style={
-                                    "fontSize": "11px",
-                                    "color": "#666",
-                                    "fontWeight": "bold"
-                                }
-                            ),
-                            html.Span(
-                                badge_text,
-                                style={
-                                    "fontSize": "10px",
-                                    "color": "#fff",
-                                    "backgroundColor": badge_color,
-                                    "padding": "1px 6px",
-                                    "borderRadius": "3px"
-                                }
-                            )
-                        ]
+                        }
                     ),
                     # Line 2: Article title
                     html.Div(

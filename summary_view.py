@@ -160,8 +160,29 @@ def render_summary_view(basename: str, sum_json: Dict[str, Any]) -> html.Div:
     # Extract metadata
     title = meta.get("title", basename)
     provider = meta.get("provider", "Unknown")
+    products = meta.get("products", [])
     published_date = meta.get("published_date", "")
     horizon = meta.get("horizon", "u")
+    
+    # Fix provider if still a short code or "O" — extract from basename/title prefix
+    if provider in ("O", "Unknown", "") or len(provider) <= 3:
+        # Try to extract provider code from title prefix (e.g., "GM_Commodity...")
+        raw_title = title or basename
+        if "_" in raw_title:
+            code = raw_title.split("_", 1)[0]
+            _prefix_map = {
+                "BOA": "Bank of America", "BA": "Barclays", "BR": "BlackRock",
+                "DB": "Deutsche Bank", "GM": "Goldman Sachs", "HT": "HighTower Research",
+                "JPM": "JP Morgan", "MZ": "Mizuho", "TSL": "TSLombard", "WF": "Wells Fargo",
+                "SEB": "SEB Commodities", "R": "Rabobank", "MUFG": "MUFG", "ANZ": "ANZ",
+                "BCA": "BCA", "BNPP": "BNPP", "BNY": "Bank of New York Melon",
+                "CACIB": "CACIB", "CITI": "Citi", "HSBC": "HSBC", "ING": "ING",
+                "MS": "Morgan Stanley", "NOM": "Nomura", "RBC": "RBC", "SG": "SocGen",
+                "STI": "Stifel", "TME": "TME", "UBS": "UBS",
+            }
+            mapped = _prefix_map.get(code)
+            if mapped:
+                provider = mapped
     
     # Format date
     try:
@@ -227,9 +248,22 @@ def render_summary_view(basename: str, sum_json: Dict[str, Any]) -> html.Div:
                 'color': 'white',
                 'padding': '6px 12px',
                 'borderRadius': '20px',
-                'fontSize': '14px'
+                'fontSize': '14px',
+                'marginRight': '10px' if products else '0px'
             }),
-        ], style={'marginBottom': '15px'}),
+        ] + ([
+            html.Span(
+                ", ".join(products) if isinstance(products, list) else str(products),
+                style={
+                    'display': 'inline-block',
+                    'backgroundColor': '#17a2b8',
+                    'color': 'white',
+                    'padding': '6px 12px',
+                    'borderRadius': '20px',
+                    'fontSize': '14px'
+                }
+            )
+        ] if products else []), style={'marginBottom': '15px'}),
         
         # Status indicator
         html.Div([

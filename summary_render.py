@@ -646,6 +646,25 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
         horizon = meta.get("horizon", "u")
         theme = meta.get("theme", "")
         products = meta.get("products", [])
+        
+        # Fix provider if still a short code or "O" — extract from title prefix
+        if provider in ("O", "Unknown", "") or len(provider) <= 3:
+            raw_title = meta.get("title", "")
+            if "_" in raw_title:
+                code = raw_title.split("_", 1)[0]
+                _pmap = {
+                    "BOA": "Bank of America", "BA": "Barclays", "BR": "BlackRock",
+                    "DB": "Deutsche Bank", "GM": "Goldman Sachs", "HT": "HighTower Research",
+                    "JPM": "JP Morgan", "MZ": "Mizuho", "TSL": "TSLombard", "WF": "Wells Fargo",
+                    "SEB": "SEB Commodities", "R": "Rabobank", "MUFG": "MUFG", "ANZ": "ANZ",
+                    "BCA": "BCA", "BNPP": "BNPP", "BNY": "Bank of New York Melon",
+                    "CACIB": "CACIB", "CITI": "Citi", "HSBC": "HSBC", "ING": "ING",
+                    "MS": "Morgan Stanley", "NOM": "Nomura", "RBC": "RBC", "SG": "SocGen",
+                    "STI": "Stifel", "TME": "TME", "UBS": "UBS",
+                }
+                mapped = _pmap.get(code)
+                if mapped:
+                    provider = mapped
         model = meta.get("model", "gpt-4o-mini")
         generated_at = meta.get("generated_at_iso", "")
         
@@ -678,9 +697,11 @@ def render_summary_pdf(json_path: Path, output_path: Optional[Path] = None) -> b
         }
         horizon_display = horizon_map.get(horizon.lower(), horizon)
         
-        # Title (clean filename)
-        original_name = json_path.stem.replace('__sum', '')
-        title_text = original_name.replace('_', ' ').replace('  ', ' ')
+        # Title (from metadata, fallback to cleaned filename)
+        title_text = meta.get("title", "")
+        if not title_text:
+            original_name = json_path.stem.replace('__sum', '')
+            title_text = original_name.replace('_', ' ').replace('  ', ' ')
         
         title_style = ParagraphStyle(
             'Title',

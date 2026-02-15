@@ -28,6 +28,75 @@ PRODUCT_CODES = [
     "CHF", "AUD", "CAD", "ZB", "ZF", "ZT", "TN", "UB"
 ]
 
+# Asset classes (ordered for grouping)
+ASSET_CLASSES = [
+    "EQUITIES", "RATES", "COMMODITIES", "FX",
+    "VOLATILITY", "CRYPTO", "CREDIT", "GENERAL"
+]
+
+# Product → Asset class mapping
+PRODUCT_TO_ASSET_CLASS = {
+    # Equities
+    "ES": "EQUITIES", "NQ": "EQUITIES", "RTY": "EQUITIES", "Dow": "EQUITIES",
+    # Rates
+    "ZN": "RATES", "ZB": "RATES", "ZF": "RATES", "ZT": "RATES", "TN": "RATES", "UB": "RATES",
+    # Commodities
+    "GC": "COMMODITIES", "SI": "COMMODITIES", "CL": "COMMODITIES", "NG": "COMMODITIES",
+    "HG": "COMMODITIES", "ZC": "COMMODITIES", "ZS": "COMMODITIES", "ZW": "COMMODITIES",
+    "HO": "COMMODITIES", "RB": "COMMODITIES",
+    # FX
+    "EUR": "FX", "GBP": "FX", "JPY": "FX", "CHF": "FX", "AUD": "FX", "CAD": "FX",
+    # Volatility
+    "VIX": "VOLATILITY",
+    # Crypto
+    "BTC": "CRYPTO",
+}
+
+# Allowed equity tickers (Top 10 US market cap + Large Banks)
+TOP_10_US_MARKET_CAP = {"AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK.B", "JPM", "V"}
+LARGE_BANKS = {"JPM", "BAC", "WFC", "C", "GS", "MS"}
+ALLOWED_EQUITY_TICKERS = TOP_10_US_MARKET_CAP | LARGE_BANKS
+
+def _product_to_asset_class(product: str) -> str:
+    """Map product code to asset class. Unknown → GENERAL."""
+    if product in PRODUCT_TO_ASSET_CLASS:
+        return PRODUCT_TO_ASSET_CLASS[product]
+    if product in ALLOWED_EQUITY_TICKERS:
+        return "EQUITIES"
+    # If looks like equity ticker (2-5 uppercase) but not allowed → EQUITIES (suppressed)
+    if product and len(product) <= 5 and product.isupper() and product.isalpha():
+        return "EQUITIES"
+    return "GENERAL"
+
+
+def _is_allowed_equity_ticker(product: str) -> bool:
+    """Return True if product is an allowed equity ticker."""
+    return product in ALLOWED_EQUITY_TICKERS
+
+
+def _should_suppress_equity(product: str) -> bool:
+    """Return True if product is equity-like but NOT allowed."""
+    if product in PRODUCT_TO_ASSET_CLASS:
+        return False  # Known futures/indices are never suppressed
+    if product in ALLOWED_EQUITY_TICKERS:
+        return False  # Allowed equities are kept
+    # Check if looks like equity ticker
+    if product and len(product) <= 5 and product.isupper() and product.isalpha():
+        return True  # Suppress non-allowed equity tickers
+    return False
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Jaccard similarity on word sets (simple, deterministic)."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    intersection = len(words_a & words_b)
+    union = len(words_a | words_b)
+    return intersection / union if union > 0 else 0.0
+
+
 def _looks_like_trade_idea(text: str) -> bool:
     """
     Detect if text looks like a trade idea (should be filtered from observations).
@@ -202,17 +271,18 @@ def _resolve_bullet_products(
 ) -> List[str]:
     """
     Resolve products for a bullet. NEVER default to article_products (ALL_PRODUCTS).
+    Suppress non-allowed equity tickers.
     Priority: item.products → infer from text → [] (General).
     """
     item_products = it.get("products", []) if isinstance(it, dict) else []
     if item_products and isinstance(item_products, list):
-        valid = [p for p in item_products if p in PRODUCT_CODES]
+        valid = [p for p in item_products if p in PRODUCT_CODES and not _should_suppress_equity(p)]
         if valid:
             return sorted(set(valid))
     inferred = _infer_products_from_text(text, section, article_products)
-    if inferred:
-        return inferred
-    return []  # Unassigned → General
+    # Filter suppressed from inferred
+    inferred = [p for p in inferred if not _should_suppress_equity(p)]
+    return inferred if inferred else []
 
 
 def _dedupe_bullets(items: List[dict]) -> List[dict]:
@@ -246,6 +316,158 @@ def _group_by_product(items: List[dict]) -> Dict[str, List[dict]]:
         else:
             grouped[GENERAL_BUCKET].append(item)
     return dict(grouped)
+
+
+def _group_by_asset_class(items: List[dict]) -> Dict[str, List[dict]]:
+    """
+    Group items by asset class. Items with products=[] → GENERAL.
+    Order keys by ASSET_CLASSES order.
+    """
+    grouped: Dict[str, List[dict]] = defaultdict(list)
+    for item in items:
+        item_products = item.get("products", [])
+        if item_products:
+            # Determine asset class from first non-suppressed product
+            asset_class = "GENERAL"
+            for p in item_products:
+                if not _should_suppress_equity(p):
+                    asset_class = _product_to_asset_class(p)
+                    break
+            grouped[asset_class].append(item)
+        else:
+            grouped["GENERAL"].append(item)
+    
+    # Return in fixed ASSET_CLASSES order (only keys that have items)
+    return {ac: grouped[ac] for ac in ASSET_CLASSES if ac in grouped}
+
+def _build_executive_snapshot(
+    article_sum_jsons: List[dict],
+    tldr_items: List[dict],
+    volatility_by_asset_class: Dict[str, dict],
+) -> List[dict]:
+    """
+    Build executive_snapshot from TLDR + volatility + recurring themes.
+    Frequency-weighted: include if mentioned in ≥2 articles OR volatility High.
+    Max 5 bullets. Dedupe by similarity ≥0.85.
+    """
+    candidates = []
+    
+    # Count TLDR text frequency across articles
+    text_counts: Dict[str, int] = defaultdict(int)
+    text_sources: Dict[str, set] = defaultdict(set)
+    for a in article_sum_jsons:
+        provider = a.get("meta", {}).get("provider", "O")
+        for item in a.get("sections", {}).get("tldr", []):
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            text = text.strip()
+            if text:
+                text_counts[text] += 1
+                text_sources[text].add(provider)
+    
+    # Include if count ≥ 2
+    for text, count in text_counts.items():
+        if count >= 2:
+            candidates.append({"text": text, "sources": sorted(text_sources[text]), "_score": count})
+    
+    # Add volatility lines for High expected_volatility
+    for asset_class, vol_data in volatility_by_asset_class.items():
+        if vol_data.get("expected_volatility") == "High":
+            skew = vol_data.get("directional_skew", "Neutral")
+            text = f"{asset_class}: High volatility expected, {skew} skew."
+            candidates.append({"text": text, "sources": vol_data.get("sources", []), "_score": 3})
+    
+    # Also add top TLDR from tldr_items if underrepresented
+    for item in tldr_items[:3]:
+        text = item.get("text", "")
+        if text and text not in text_counts:
+            candidates.append({"text": text, "sources": item.get("sources", []), "_score": 1})
+    
+    # Sort by score descending
+    candidates.sort(key=lambda x: -x.get("_score", 0))
+    
+    # Dedupe by similarity ≥ 0.85
+    final = []
+    for c in candidates:
+        text = c["text"]
+        is_dup = any(_text_similarity(text, f["text"]) >= 0.85 for f in final)
+        if not is_dup:
+            final.append({"text": text, "sources": c["sources"]})
+        if len(final) >= 5:
+            break
+    
+    return final
+
+
+def _aggregate_volatility_by_asset_class(article_sum_jsons: List[dict]) -> Dict[str, dict]:
+    """
+    Aggregate volatility_impact and sentiment_indicator by asset class.
+    Score: High=3, Medium=2, Low=1. Average across articles.
+    """
+    from collections import Counter
+    
+    VOL_SCORE = {"High": 3, "Medium": 2, "Low": 1}
+    
+    # Collect per asset class
+    ac_data: Dict[str, dict] = defaultdict(lambda: {
+        "vol_scores": [], "skews": [], "sources": set()
+    })
+    
+    for a in article_sum_jsons:
+        provider = a.get("meta", {}).get("provider", "O")
+        products = a.get("meta", {}).get("products", []) or []
+        vol = a.get("volatility_impact", {})
+        if not vol or not isinstance(vol, dict):
+            continue
+        
+        expected = vol.get("expected_volatility", "")
+        skew = vol.get("directional_skew", "")
+        
+        # Determine asset classes for this article
+        asset_classes_for_article = set()
+        for p in products:
+            if not _should_suppress_equity(p):
+                asset_classes_for_article.add(_product_to_asset_class(p))
+        if not asset_classes_for_article:
+            asset_classes_for_article.add("GENERAL")
+        
+        for ac in asset_classes_for_article:
+            if expected in VOL_SCORE:
+                ac_data[ac]["vol_scores"].append(VOL_SCORE[expected])
+            if skew:
+                ac_data[ac]["skews"].append(skew)
+            ac_data[ac]["sources"].add(provider)
+    
+    # Build result
+    result = {}
+    for ac in ASSET_CLASSES:
+        if ac not in ac_data:
+            continue
+        data = ac_data[ac]
+        if not data["vol_scores"]:
+            continue
+        
+        avg_score = sum(data["vol_scores"]) / len(data["vol_scores"])
+        # Map score back to label
+        if avg_score >= 2.5:
+            expected_vol = "High"
+        elif avg_score >= 1.5:
+            expected_vol = "Medium"
+        else:
+            expected_vol = "Low"
+        
+        # Mode for skew
+        skew_counter = Counter(data["skews"])
+        directional_skew = skew_counter.most_common(1)[0][0] if skew_counter else "Neutral"
+        
+        result[ac] = {
+            "expected_volatility": expected_vol,
+            "directional_skew": directional_skew,
+            "confidence_score": round(avg_score, 2),
+            "sources": sorted(data["sources"]),
+        }
+    
+    return result
+
 
 def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_articles_required: int = 3) -> dict:
     """
@@ -287,7 +509,7 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
 
     def gather_grouped(section: str, limit: int = 30) -> Dict[str, List[dict]]:
         items = gather(section, limit=limit, filter_trade_ideas=(section == "what_occurred"))
-        return _group_by_product(items)
+        return _group_by_asset_class(items)
 
     # Aggregate trade ideas by product (new structure)
     # Trade ideas now structured by product with: product, bias, catalyst, setup, key_levels, risk, time_horizon, volatility_impact
@@ -305,6 +527,10 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
                 continue
             product = t.get("product", "")
             if not product:
+                continue
+            
+            # Skip non-allowed equity tickers entirely
+            if _should_suppress_equity(product):
                 continue
             
             # Initialize product entry if needed
@@ -426,6 +652,22 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "titles": [m.get("title", "")] if m.get("title") else []
         })
 
+    # Build components in strict order
+    warnings_list = gather("warnings", limit=15)
+    tldr_list = gather("tldr", limit=6)
+    
+    # Volatility aggregation (before executive_snapshot)
+    volatility_by_asset_class = _aggregate_volatility_by_asset_class(article_sum_jsons)
+    
+    # Executive snapshot (needs tldr_list and volatility_by_asset_class)
+    executive_snapshot = _build_executive_snapshot(
+        article_sum_jsons, tldr_list, volatility_by_asset_class
+    )
+    
+    # Grouped sections (asset-class-keyed)
+    observations = gather_grouped("what_occurred", limit=30)
+    forward_watch = gather_grouped("forward_watch", limit=25)
+
     rollup = {
         "schema_version": ROLLUP_SCHEMA_V1,
         "kind": "rollup",
@@ -465,8 +707,12 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             ]
         },
         "sections": {
-            # New trader-focused structure
-            "tldr": gather("tldr", limit=6),
+            "warnings": warnings_list,
+            "executive_snapshot": executive_snapshot,
+            "tldr": tldr_list,
+            "observations": observations,
+            "forward_watch": forward_watch,
+            "volatility_by_asset_class": volatility_by_asset_class,
             "trade_ideas": trade_ideas_list,
             "stocks": gather("stocks", limit=8),
             "other_futures": gather("other_futures", limit=20),
@@ -474,10 +720,6 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "other": gather("other", limit=15),
             "consensus_catalysts": consensus_catalysts[:3],
             "conflicts_uncertainties": conflicts[:3],
-            # Keep legacy fields for backward compatibility but they won't be rendered
-            "observations": gather_grouped("what_occurred", limit=30),
-            "forward_watch": gather_grouped("forward_watch", limit=25),
-            "warnings": gather("warnings", limit=15),
             "tips_reminders": gather("tips_reminders", limit=10),
             "cross_asset_impacts": gather("cross_asset_impacts", limit=15),
             "scenarios": gather("scenarios", limit=8),
@@ -528,7 +770,7 @@ def build_weekly_rollup(start_date: dt.date, end_date: dt.date, article_sum_json
 
     def gather_grouped(section: str, limit: int = 30) -> Dict[str, List[dict]]:
         items = gather(section, limit=limit, filter_trade_ideas=(section == "what_occurred"))
-        return _group_by_product(items)
+        return _group_by_asset_class(items)
 
     # trade ideas - emphasize w_1_2 and gt_2w for weekly
     trades = []
