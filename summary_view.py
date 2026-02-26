@@ -2,13 +2,15 @@
 Summary View Renderer for TWIFO App
 Purpose: Beautiful article rendering from sum.json
 Author: Kevin Lefebvre
-Last Updated: 2026-02-12
+Last Updated: 2026-02-14
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any
 from dash import html, dcc
+from twifo_app import resolve_display_title, _detect_provider
 
 
 def load_summary_json(basename: str, files_dir: Path, path_manager=None) -> Optional[Dict[str, Any]]:
@@ -142,47 +144,44 @@ def render_failed_summary(sum_json: Dict[str, Any], basename: str) -> html.Div:
     })
 
 
-def render_summary_view(basename: str, sum_json: Dict[str, Any]) -> html.Div:
+def render_summary_view(
+    basename: str,
+    sum_json: Dict[str, Any],
+    display_provider: Optional[str] = None,
+) -> html.Div:
     """
     Render beautiful summary view from sum.json.
-    
+
     Args:
-        basename: Base filename
+        basename: Base filename or artifact folder name
         sum_json: Parsed sum.json dict
-    
+        display_provider: Optional resolved provider name (e.g. from sidebar).
+            When provided, used for the provider pill so it matches the article button.
+
     Returns:
         Dash html.Div with rendered summary
     """
     meta = sum_json.get("meta", {})
     sections = sum_json.get("sections", {})
     extraction = sum_json.get("extraction", {})
-    
+
     # Extract metadata
-    title = meta.get("title", basename)
-    provider = meta.get("provider", "Unknown")
+    title = resolve_display_title(basename, sum_json=sum_json)
+    provider = display_provider if display_provider else meta.get("provider", "Unknown")
     products = meta.get("products", [])
     published_date = meta.get("published_date", "")
     horizon = meta.get("horizon", "u")
-    
-    # Fix provider if still a short code or "O" — extract from basename/title prefix
-    if provider in ("O", "Unknown", "") or len(provider) <= 3:
-        # Try to extract provider code from title prefix (e.g., "GM_Commodity...")
-        raw_title = title or basename
-        if "_" in raw_title:
-            code = raw_title.split("_", 1)[0]
-            _prefix_map = {
-                "BOA": "Bank of America", "BA": "Barclays", "BR": "BlackRock",
-                "DB": "Deutsche Bank", "GM": "Goldman Sachs", "HT": "HighTower Research",
-                "JPM": "JP Morgan", "MZ": "Mizuho", "TSL": "TSLombard", "WF": "Wells Fargo",
-                "SEB": "SEB Commodities", "R": "Rabobank", "MUFG": "MUFG", "ANZ": "ANZ",
-                "BCA": "BCA", "BNPP": "BNPP", "BNY": "Bank of New York Melon",
-                "CACIB": "CACIB", "CITI": "Citi", "HSBC": "HSBC", "ING": "ING",
-                "MS": "Morgan Stanley", "NOM": "Nomura", "RBC": "RBC", "SG": "SocGen",
-                "STI": "Stifel", "TME": "TME", "UBS": "UBS",
-            }
-            mapped = _prefix_map.get(code)
-            if mapped:
-                provider = mapped
+
+    # Fallback: when no display_provider and meta has "O"/short, derive from basename (match sidebar logic)
+    if not display_provider and (provider in ("O", "Unknown", "") or (isinstance(provider, str) and len(provider) <= 3)):
+        provider = _detect_provider(basename)
+
+    # Fallback: extract frequency from basename if horizon is unknown
+    if horizon == "u" and "_" in basename:
+        # Try to extract frequency suffix from basename (e.g., "_w" → "w")
+        freq_match = re.search(r"[_\-]([wdmuqy])(?:__|$)", basename)
+        if freq_match:
+            horizon = freq_match.group(1)
     
     # Format date
     try:
@@ -552,12 +551,11 @@ def render_trade_ideas(trade_ideas: list) -> html.Div:
     ], style={'marginBottom': '25px'})
 
 
-def render_collapsible_section(title: str, content: list) -> html.Div:
-    """Render a collapsible section."""
-    section_id = title.lower().replace(' ', '-')
-    
-    return html.Details([
-        html.Summary(title, style={
+def render_collapsible_section(title: str, content: list, default_open: bool = True) -> html.Details:
+    """Render a collapsible section. Minimizable but expanded by default."""
+    return html.Details(
+        [
+            html.Summary(title, style={
             'color': '#004080',
             'fontSize': '20px',
             'fontWeight': 'bold',
@@ -576,7 +574,9 @@ def render_collapsible_section(title: str, content: list) -> html.Div:
             'borderRadius': '0 0 8px 8px',
             'marginBottom': '25px'
         })
-    ])
+    ],
+        open=default_open  # Expanded by default; user can collapse
+    )
 
 
 def render_numeric_claims(numeric_claims: list) -> html.Div:

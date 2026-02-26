@@ -54,6 +54,84 @@ The Dropbox Material Management system is a professional-grade platform that ena
 - **Interactive Tables**: Sortable and filterable document listings
 - **User Management**: Secure login and access control
 
+---
+
+## 📅 Economic Calendar
+
+The Economic Calendar feature lets you paste a weekly macro calendar into the app, store it locally in SQLite, and surface today's events inside the Daily View summary.
+
+---
+
+### Database file location
+
+```
+TWIFO_Sharing/data/twifo_econ.db
+```
+
+The SQLite file is created automatically on first use. Three tables are maintained:
+
+| Table | Purpose |
+|---|---|
+| `econ_week` | One row per imported week (stores raw pasted text) |
+| `econ_event` | One row per event parsed from the week block |
+| `econ_event_analysis` | Cached LLM-generated Theory/Dynamics blurbs per event |
+
+If the file is missing the app will recreate it on the next import. If it is locked or corrupt, a descriptive banner appears in both the admin page and the daily summary panel — no silent failures.
+
+---
+
+### How to paste a new week
+
+1. Log in and navigate to the **Economic Calendar** tab (or click the **📅 Economic Calendar** button in the top control row).
+2. *(Optional)* Set the **Dynamics mode** toggle to **On** (default) or **Off**. When off, only Theory explainers are generated; Dynamics are hidden everywhere.
+3. Paste your weekly calendar text into the textarea. Expected format:
+
+```
+Sunday, February 22 to Saturday, February 28, 2026
+
+Monday, February 23, 2026
+10:00 CB Consumer Confidence (Feb)
+
+Tuesday, February 24, 2026
+All United States - Washington's Birthday - USD*
+08:30 Durable Goods Orders (Jan)
+```
+
+**Parsing rules:**
+- Week header: `Sunday, Month D to Saturday, Month D, YYYY`
+- Day headers: `Weekday, Month D, YYYY`
+- Timed events start with `HH:MM` (24-hour)
+- All-day events start with `All`
+- Optional trailing currency tag: `EUR*`, `JPY*`, `CHINA*` (3–5 uppercase letters + `*`)
+- Optional country prefix: `Country - Event Title`
+- Blank lines and section headers (e.g. "Notable Economic Data Releases") are ignored
+
+4. Click **Parse** — a preview grouped by day appears immediately with errors pinpointed to the failing line if any.
+5. Click **Save** (enabled only after a successful parse). The week is upserted — re-importing the same week range replaces its events.
+6. Previously imported weeks appear below the form with a **Load for Editing** button that repopulates the textarea.
+
+---
+
+### How the Daily View displays events
+
+When you open the **Daily View** tab and select a date with stored events:
+
+1. At the bottom of the daily rollup summary an **📅 Economic Events** panel appears automatically.
+2. Each event is listed with its time (`HH:MM`) or **All-day** label, title, country badge, and currency tag.
+3. Click **▶ Theory** on any event to expand a beginner-friendly explainer of what the indicator measures and what a high/low reading implies. The LLM call happens **on demand** — the rest of the page loads instantly.
+4. Click **▶ Dynamics** (visible when Dynamics mode is **On**) to see how today's macro backdrop (drawn from the daily rollup TLDR, executive snapshot, and forward risks) could amplify or dampen the event's impact.
+5. Results are cached in `econ_event_analysis` keyed by `(event_id, date, rollup_context_hash)`. A repeat click on the same day serves the cached blurb without a second API call.
+6. A **"cached"** indicator appears next to the event header when the stored result is reused.
+
+**Guardrails applied to all generated blurbs:**
+- Speeches and holidays always note that reaction depends on content and positioning.
+- CPI, PPI, jobless claims, and consumer confidence always include a one-sentence link to bond yields and USD direction.
+- Each blurb is capped at 6 lines.
+- Hyphens used as em-dash separators are replaced with commas.
+- A small *"Educational only. Not financial advice."* disclaimer is shown at the top of the panel.
+
+---
+
 ## Installation
 
 ### Prerequisites

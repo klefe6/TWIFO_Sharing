@@ -7,12 +7,14 @@ Last Updated: 2026-02-12
 Changelog:
   v1.0 - Initial rollup aggregator prompt. Consensus themes, divergences,
          catalysts calendar, risk framing, numeric registry. Input = sum.json list.
+  v1.1 - Added individual stock suppression, context requirement (why-it-matters),
+         and ai_context commentary field on every bullet for plain-English explanation.
 """
 
 import hashlib
 from pathlib import Path
 
-ROLLUP_PROMPT_VERSION = "1.0"
+ROLLUP_PROMPT_VERSION = "1.1"
 
 # ---------------------------------------------------------------------------
 # SYSTEM PROMPT
@@ -64,6 +66,56 @@ ROLLUP_SYSTEM_PROMPT = (
     "- If a number cannot be traced to an input summary, DROP it entirely.\n"
     "- Counts (like provider_count) are exempt from the registry.\n\n"
 
+    # ── INDIVIDUAL STOCK SUPPRESSION ──
+    "INDIVIDUAL STOCK SUPPRESSION (MANDATORY):\n"
+    "- This rollup targets macro/futures traders. Individual stock commentary is "
+    "NOISE unless the company is large enough to move the overall market.\n"
+    "- ALLOWED equity tickers (market-moving): AAPL, MSFT, AMZN, NVDA, GOOGL, "
+    "META, TSLA, BRK.B, JPM, GS, MS, BAC, WFC, C, V.\n"
+    "- SUPPRESS all other individual stock mentions (e.g. Charter, Comcast, "
+    "small-cap earnings). Do NOT include them in observations, tldr, or "
+    "forward_watch.\n"
+    "- BACKFILL EXCEPTION: If the rollup would have fewer than 3 bullets in "
+    "observations after suppression, you may include suppressed stock bullets "
+    "as backfill. When you do, prefix the text with '[EQUITY: TICKER] ' so "
+    "readers know it is a single-stock item (e.g. '[EQUITY: CHTR] Charter "
+    "raised broadband prices ~3%...').\n"
+    "- If an allowed equity ticker appears, also prefix it with "
+    "'[EQUITY: TICKER] ' for visual clarity.\n\n"
+
+    # ── CONTEXT REQUIREMENT ──
+    "CONTEXT REQUIREMENT (MANDATORY):\n"
+    "- Every bullet in tldr, consensus_themes.summary, forward_watch, and "
+    "observations MUST include a 'why it matters' clause that links the fact "
+    "to its macro or product-level impact.\n"
+    "- BAD: 'The company raised broadband prices by ~3%, impacting subscriber "
+    "growth.'\n"
+    "- GOOD: 'Charter raised broadband prices ~3%, signaling sticky services "
+    "inflation that could delay Fed rate cuts, pressuring ZN lower (BOA)'\n"
+    "- BAD: 'Goldman Sachs maintains a Sell rating with a target price of $1.75.'\n"
+    "- GOOD: '[EQUITY: GS] Goldman Sachs maintains a Sell rating on X at $1.75, "
+    "reflecting broader risk-off sentiment in financials that weighs on ES (JPM)'\n"
+    "- If you cannot articulate a macro/product impact for a bullet, DROP it.\n\n"
+
+    # ── AI CONTEXT COMMENTARY ──
+    "AI CONTEXT COMMENTARY (MANDATORY):\n"
+    "- Every bullet object in tldr, observations, forward_watch, warnings, "
+    "tips_reminders, cross_asset_impacts, and scenarios MUST include an "
+    "'ai_context' string field.\n"
+    "- ai_context is a 1-2 sentence plain-English explanation of HOW and WHY "
+    "this event could affect specific products or the overall market. Write it "
+    "for someone with limited knowledge of fundamental finance.\n"
+    "- Mention specific affected products by name (ES, ZN, GC, CL, etc.) and "
+    "the expected direction (higher/lower/volatile).\n"
+    "- Example: {\"text\": \"CPI came in hot at 3.2% vs 3.0% expected (JPM, BOA)\", "
+    "\"ai_context\": \"Higher-than-expected inflation means the Fed is less likely "
+    "to cut rates soon. This typically pushes bond prices down (ZN, ZB) and can "
+    "weigh on equities (ES, NQ) as borrowing costs stay elevated.\", "
+    "\"sources\": [\"JPM\", \"BOA\"]}\n"
+    "- ai_context is grounded in the article content but you MAY use standard "
+    "macro-financial reasoning to explain the causal chain (e.g. 'higher CPI → "
+    "hawkish Fed → bonds lower'). This is the ONE exception to strict grounding.\n\n"
+
     # ── LEAN PLACEHOLDERS ──
     "LEAN PLACEHOLDERS:\n"
     "- Empty arrays = []. Empty scalars = \"(none)\". "
@@ -87,7 +139,7 @@ ROLLUP_USER_PROMPT = (
 
     # -- _meta --
     '  "_meta": {\n'
-    '    "rollup_prompt_version": "1.0",\n'
+    '    "rollup_prompt_version": "1.1",\n'
     '    "input_count": 0,\n'
     '    "input_providers": ["BOA", "JPM"],\n'
     '    "input_date_range": "2026-02-10 to 2026-02-10",\n'
@@ -191,14 +243,20 @@ ROLLUP_USER_PROMPT = (
 
     # -- tldr --
     '  "tldr": [\n'
-    '    "3-5 bullets synthesizing the most important cross-provider takeaways",\n'
-    '    "Each bullet must cite source_providers in parentheses, e.g. (BOA, JPM)",\n'
-    '    "Numbers only if in rollup_numeric_claims"\n'
+    "    {\n"
+    '      "text": "3-5 bullets synthesizing the most important cross-provider takeaways. Cite sources in parentheses, e.g. (BOA, JPM). Numbers only if in rollup_numeric_claims.",\n'
+    '      "ai_context": "1-2 sentence plain-English explanation of why this matters and which products are affected, for someone with limited finance knowledge.",\n'
+    '      "sources": ["BOA", "JPM"]\n'
+    "    }\n"
     "  ],\n\n"
 
     # -- forward_watch --
     '  "forward_watch": [\n'
-    '    "Forward-looking items from inputs, with (provider) attribution"\n'
+    "    {\n"
+    '      "text": "Forward-looking item from inputs, with (provider) attribution",\n'
+    '      "ai_context": "Plain-English explanation of how this upcoming event could move specific products.",\n'
+    '      "sources": ["JPM"]\n'
+    "    }\n"
     "  ]\n"
 
     "}\n\n"
@@ -217,11 +275,18 @@ ROLLUP_USER_PROMPT = (
     "Do NOT add standard economic calendar events unless an input mentions them.\n"
     "6. primary_entities: ONLY entities discussed by >=2 providers or central "
     "to a consensus theme. Max 10.\n"
-    "7. tldr: 3-5 bullets. Each must attribute sources.\n"
+    "7. tldr: 3-5 bullets as objects with text, ai_context, and sources. Each must attribute sources.\n"
     "8. Empty arrays = []. Empty scalars = \"(none)\". "
     "NEVER use [\"(none)\"] or placeholder arrays.\n"
     "9. Do NOT remove _meta, rollup_numeric_claims, consensus_themes, or "
-    "divergences keys. They are required even if empty.\n\n"
+    "divergences keys. They are required even if empty.\n"
+    "10. EVERY bullet object in tldr, observations, forward_watch, warnings, "
+    "tips_reminders, cross_asset_impacts, and scenarios MUST have an 'ai_context' "
+    "string explaining the macro impact in plain English.\n"
+    "11. Individual stock bullets MUST be suppressed unless the ticker is in the "
+    "allowed list (AAPL, MSFT, AMZN, NVDA, GOOGL, META, TSLA, BRK.B, JPM, GS, "
+    "MS, BAC, WFC, C, V). Surviving equity bullets MUST be prefixed with "
+    "'[EQUITY: TICKER] '.\n\n"
 
     "INPUT SUMMARIES (JSON array):\n<<<\n<<<SUMMARIES_PLACEHOLDER>>>\n>>>"
 )

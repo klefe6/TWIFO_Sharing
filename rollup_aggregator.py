@@ -506,6 +506,238 @@ def verify_rollup_numerics(
 
 
 # ---------------------------------------------------------------------------
+# Normalize LLM flat output → twifo.rollup.v1 structure for renderers
+# ---------------------------------------------------------------------------
+def normalize_to_v1(
+    llm_output: dict,
+    summaries: List[dict],
+    rollup_kind: str = "daily",
+    target_date: Optional[str] = None,
+) -> dict:
+    """Convert the flat LLM rollup JSON into the twifo.rollup.v1 schema
+    expected by summary_render.py and twifo.py.
+
+    The LLM returns top-level keys like tldr, forward_watch, consensus_themes.
+    The renderers expect meta, ui, sections, inputs nested structure.
+    """
+    llm_meta = llm_output.get("_meta", {})
+    providers = llm_meta.get("input_providers", [])
+    date_str = target_date or llm_meta.get("target_date", "")
+    article_count = llm_meta.get("input_count", len(summaries))
+    model = llm_meta.get("model")
+    products = sorted({
+        p
+        for s in summaries
+        for p in (s.get("meta", {}).get("products") or [])
+    })
+
+    # Build inputs list from article summaries
+    inputs_articles = []
+    for s in summaries:
+        sm = s.get("meta", {})
+        inputs_articles.append({
+            "file": sm.get("source_file", ""),
+            "provider": sm.get("provider", "O"),
+            "title": sm.get("title", ""),
+            "horizon": sm.get("horizon", "u"),
+            "products": sm.get("products", []),
+        })
+
+    # Build UI
+    kind_label = "Daily" if rollup_kind == "daily" else "Weekly"
+    title = f"{kind_label} Research Rollup — {date_str}"
+    header_pills = [
+        {"text": ", ".join(providers), "type": "provider"},
+        {"text": date_str, "type": "date"},
+        {"text": kind_label, "type": "timeframe"},
+    ]
+    chips_rows = [
+        [{"text": p, "type": "product"} for p in products],
+        [{"text": p, "type": "source"} for p in providers],
+    ]
+
+    # Map LLM tldr (may be list of strings or list of dicts)
+    raw_tldr = llm_output.get("tldr", [])
+    tldr = []
+    for item in raw_tldr:
+        if isinstance(item, dict):
+            tldr.append(item)
+        elif isinstance(item, str):
+            tldr.append({"text": item, "sources": providers})
+
+    # Map forward_watch (same flexibility)
+    raw_fw = llm_output.get("forward_watch", [])
+    forward_watch: Dict[str, list] = {}
+    for item in raw_fw:
+        entry = item if isinstance(item, dict) else {"text": str(item), "sources": providers}
+        forward_watch.setdefault("General", []).append(entry)
+
+    # Build observations from:
+    # 1) consensus_themes from LLM
+    # 2) what_occurred / what_moved_today from input article summaries
+    observations: Dict[str, list] = {}
+    _seen_obs_text: set = set()
+
+    # 1) Consensus themes → observations
+    for theme in llm_output.get("consensus_themes", []):
+        if not isinstance(theme, dict):
+            continue
+        entities = theme.get("affected_entities", []) or ["General"]
+        summary_text = theme.get("summary", theme.get("theme", ""))
+        evidence = theme.get("evidence_quotes", [])
+        src = theme.get("source_providers", providers)
+        ai_ctx = theme.get("ai_context", "")
+        bullet: Dict[str, Any] = {
+            "text": summary_text,
+            "sources": src,
+        }
+        if ai_ctx:
+            bullet["ai_context"] = ai_ctx
+        if evidence:
+            bullet["text"] += f" Evidence: {evidence[0]}" if len(evidence) == 1 else ""
+        _seen_obs_text.add(summary_text.lower().strip())
+        for entity in entities:
+            observations.setdefault(entity, []).append(bullet)
+
+    # 2) Aggregate what_occurred / what_moved_today from input summaries
+    for s in summaries:
+        provider = s.get("meta", {}).get("provider", "O")
+        article_products = s.get("meta", {}).get("products", [])
+        secs = s.get("sections", {})
+        obs_items = secs.get("what_occurred", []) or secs.get("what_moved_today", []) or []
+        for item in obs_items:
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            if not text or text.lower().strip() in _seen_obs_text:
+                continue
+            _seen_obs_text.add(text.lower().strip())
+            ai_ctx = item.get("ai_context", "") if isinstance(item, dict) else ""
+            entry: Dict[str, Any] = {"text": text, "sources": [provider]}
+            if ai_ctx:
+                entry["ai_context"] = ai_ctx
+            bucket = article_products[0] if article_products else "General"
+            observations.setdefault(bucket, []).append(entry)
+
+    # 3) Aggregate forward_watch from input summaries into forward_watch dict
+    for s in summaries:
+        provider = s.get("meta", {}).get("provider", "O")
+        article_products = s.get("meta", {}).get("products", [])
+        secs = s.get("sections", {})
+        fw_items = secs.get("forward_watch", []) or secs.get("what_can_move_tomorrow", []) or []
+        for item in fw_items:
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            if not text:
+                continue
+            ai_ctx = item.get("ai_context", "") if isinstance(item, dict) else ""
+            entry_fw: Dict[str, Any] = {"text": text, "sources": [provider]}
+            if ai_ctx:
+                entry_fw["ai_context"] = ai_ctx
+            bucket = article_products[0] if article_products else "General"
+            forward_watch.setdefault(bucket, []).append(entry_fw)
+
+    # Map trade_ideas_synthesis → trade_ideas with timeframe buckets
+    trade_ideas: Dict[str, list] = {"d_1_3": [], "w_1_2": [], "gt_2w": [], "watchlist_only": []}
+    for idea in llm_output.get("trade_ideas_synthesis", []):
+        if not isinstance(idea, dict):
+            continue
+        mapped = {
+            "direction": idea.get("consensus_bias", "neutral").lower(),
+            "instrument": idea.get("product", ""),
+            "trigger": idea.get("catalyst", ""),
+            "rationale": "; ".join(idea.get("evidence_quotes", [])),
+            "sources": idea.get("source_providers", []),
+            "confidence_0_100": idea.get("confidence_0_100", 50),
+        }
+        levels = idea.get("key_levels", [])
+        if levels:
+            mapped["invalidation"] = f"Key levels: {', '.join(levels)}"
+        trade_ideas["w_1_2"].append(mapped)
+
+    # Map warnings from risk_framing.key_risks + input summaries
+    warnings: list = []
+    _seen_warn_text: set = set()
+    risk = llm_output.get("risk_framing", {})
+    for kr in risk.get("key_risks", []):
+        if isinstance(kr, dict):
+            text = kr.get("risk", "")
+            entry_w: Dict[str, Any] = {
+                "text": text,
+                "sources": kr.get("source_providers", []),
+            }
+            ai_ctx = kr.get("ai_context", "")
+            if ai_ctx:
+                entry_w["ai_context"] = ai_ctx
+            warnings.append(entry_w)
+            _seen_warn_text.add(text.lower().strip())
+
+    # Aggregate warnings from input summaries
+    for s in summaries:
+        provider = s.get("meta", {}).get("provider", "O")
+        for w in s.get("sections", {}).get("warnings", []):
+            text = w.get("text", "") if isinstance(w, dict) else str(w)
+            if text and text.lower().strip() not in _seen_warn_text:
+                _seen_warn_text.add(text.lower().strip())
+                warnings.append({"text": text, "sources": [provider]})
+
+    # Map catalysts_calendar into forward_watch
+    for cat in llm_output.get("catalysts_calendar", []):
+        if isinstance(cat, dict):
+            entry = {
+                "text": f"{cat.get('date_or_window', '')}: {cat.get('event', '')}",
+                "sources": cat.get("source_providers", []),
+            }
+            entities = cat.get("affected_entities", ["General"])
+            for entity in entities:
+                forward_watch.setdefault(entity, []).append(entry)
+
+    # Assemble twifo.rollup.v1
+    return {
+        "schema_version": "twifo.rollup.v1",
+        "kind": "rollup",
+        "meta": {
+            "rollup_kind": rollup_kind,
+            "date": date_str,
+            "week_range": None,
+            "min_articles_required": 1,
+            "article_count": article_count,
+            "providers": providers,
+            "products": products,
+            "generated_at_iso": llm_meta.get("generated_at_iso", _iso_now()),
+            "model": model,
+        },
+        "ui": {
+            "title": title,
+            "header_pills": header_pills,
+            "chips_rows": chips_rows,
+        },
+        "inputs": {"articles": inputs_articles},
+        "sections": {
+            "tldr": tldr,
+            "observations": observations,
+            "forward_watch": forward_watch,
+            "trade_ideas": trade_ideas,
+            "warnings": warnings,
+            "tips_reminders": [],
+            "cross_asset_impacts": [],
+            "scenarios": [],
+            "sources": [
+                {"provider": p, "titles": [
+                    a["title"] for a in inputs_articles if a.get("provider") == p
+                ]}
+                for p in providers
+            ],
+        },
+        # Preserve LLM-specific fields for debugging
+        "_llm_raw": {
+            "consensus_themes": llm_output.get("consensus_themes", []),
+            "divergences": llm_output.get("divergences", []),
+            "risk_framing": llm_output.get("risk_framing", {}),
+            "rollup_numeric_claims": llm_output.get("rollup_numeric_claims", []),
+            "numeric_coverage_pct": llm_meta.get("numeric_coverage_pct"),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main aggregator entry point
 # ---------------------------------------------------------------------------
 def aggregate_rollup(
@@ -583,7 +815,11 @@ def aggregate_rollup(
     else:
         print("[ROLLUP-AGG] All rollup numbers verified against inputs")
 
-    # 5. Stamp schema version
-    parsed["schema_version"] = ROLLUP_SCHEMA_VERSION
+    # 5. Normalize to twifo.rollup.v1 for renderers
+    v1_rollup = normalize_to_v1(
+        parsed, summaries,
+        rollup_kind=rollup_kind,
+        target_date=target_date,
+    )
 
-    return parsed, violations
+    return v1_rollup, violations

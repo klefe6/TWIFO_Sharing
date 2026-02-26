@@ -36,20 +36,32 @@ ASSET_CLASSES = [
 
 # Product → Asset class mapping
 PRODUCT_TO_ASSET_CLASS = {
-    # Equities
+    # Equities / Indices (futures + cash indices)
     "ES": "EQUITIES", "NQ": "EQUITIES", "RTY": "EQUITIES", "Dow": "EQUITIES",
+    "SPX": "EQUITIES",   # S&P 500 cash index — NOT an equity ticker
+    "NDX": "EQUITIES",   # Nasdaq-100 cash index
+    "SPY": "EQUITIES",   # S&P 500 ETF — treated as index exposure
     # Rates
     "ZN": "RATES", "ZB": "RATES", "ZF": "RATES", "ZT": "RATES", "TN": "RATES", "UB": "RATES",
-    # Commodities
+    "TIPS": "RATES",     # US TIPS index / ETF — macro rates instrument
+    "UST": "RATES",      # Generic US Treasury reference
+    # Commodities (futures + widely-used commodity ETFs)
     "GC": "COMMODITIES", "SI": "COMMODITIES", "CL": "COMMODITIES", "NG": "COMMODITIES",
     "HG": "COMMODITIES", "ZC": "COMMODITIES", "ZS": "COMMODITIES", "ZW": "COMMODITIES",
     "HO": "COMMODITIES", "RB": "COMMODITIES",
+    "SLV": "COMMODITIES",  # Silver ETF — NOT an equity
+    "GLD": "COMMODITIES",  # Gold ETF — NOT an equity
+    "USO": "COMMODITIES",  # Oil ETF — NOT an equity
     # FX
     "EUR": "FX", "GBP": "FX", "JPY": "FX", "CHF": "FX", "AUD": "FX", "CAD": "FX",
+    "DXY": "FX",         # Dollar Index
+    "USD": "FX",         # Generic USD reference
     # Volatility
     "VIX": "VOLATILITY",
+    "VVIX": "VOLATILITY",
     # Crypto
     "BTC": "CRYPTO",
+    "ETH": "CRYPTO",
 }
 
 # Allowed equity tickers (Top 10 US market cap + Large Banks)
@@ -479,6 +491,20 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
     if len(article_sum_jsons) < min_articles_required:
         raise ValueError(f"Not enough articles for rollup ({len(article_sum_jsons)} < {min_articles_required})")
 
+    # Safety: normalize provider fields from article metadata to avoid single-letter codes
+    for a in article_sum_jsons:
+        meta = a.setdefault("meta", {})
+        prov = meta.get("provider", "") or ""
+        if isinstance(prov, str):
+            prov = prov.strip()
+            if prov == "Unknown" or prov == "":
+                meta["provider"] = "Others"
+            elif len(prov) == 1 and prov != "O":
+                # Reject single-letter accidental providers; mark as Others
+                meta["provider"] = "Others"
+        else:
+            meta["provider"] = "Others"
+
     providers = sorted({a.get("meta", {}).get("provider", "O") for a in article_sum_jsons})
     products = sorted({p for a in article_sum_jsons for p in (a.get("meta", {}).get("products") or [])})
 
@@ -515,6 +541,8 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
     # Trade ideas now structured by product with: product, bias, catalyst, setup, key_levels, risk, time_horizon, volatility_impact
     # HARD RULE: Only extract exact strings from article JSON - NO HALLUCINATION
     trade_ideas_by_product = {}
+    _ti_raw_count = 0      # ideas seen before suppression filter
+    _ti_suppressed = 0     # ideas dropped by _should_suppress_equity
     for a in article_sum_jsons:
         article_trades = a.get("sections", {}).get("trade_ideas", []) or []
         provider = a.get("meta", {}).get("provider", "O")
@@ -529,8 +557,10 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             if not product:
                 continue
             
+            _ti_raw_count += 1
             # Skip non-allowed equity tickers entirely
             if _should_suppress_equity(product):
+                _ti_suppressed += 1
                 continue
             
             # Initialize product entry if needed
@@ -630,6 +660,13 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "sources": sorted(entry["sources"])
         })
 
+    # Visibility log — always emitted, explains future emptiness without re-investigation
+    print(
+        f"[TRADE_IDEAS] date={date_obj.isoformat()} articles={len(article_sum_jsons)}"
+        f" extracted={_ti_raw_count} suppressed={_ti_suppressed}"
+        f" after_filter={len(trade_ideas_list)}"
+    )
+
     # Derive consensus catalysts (from common catalysts in trade ideas)
     all_catalysts = []
     for entry in trade_ideas_list:
@@ -683,7 +720,7 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "model": _model_from_articles(article_sum_jsons),
         },
         "ui": {
-            "title": f"{_format_date_human(date_obj)} Daily Recap",
+            "title": f"Preparation for {_format_date_human(date_obj)}",
             "header_pills": [
                 _pill(", ".join(providers), "provider"),
                 _pill(date_obj.strftime("%b %d, %Y"), "date"),

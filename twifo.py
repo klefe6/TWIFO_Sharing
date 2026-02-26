@@ -8,6 +8,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from typing import Optional, List, Dict
 
+# Import economic calendar modules
+try:
+    from econ_calendar_parser import parse_week_block
+    from econ_calendar_store import upsert_week_and_events, get_weeks_in_range, get_week_raw_text, get_events_for_date, get_daily_brief, delete_week
+    from econ_calendar_db import DB_PATH
+    from econ_calendar_analysis import generate_event_analysis, compute_context_hash
+    from econ_calendar_ai import generate_for_week
+    ECON_CALENDAR_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] Economic calendar modules not available: {e}")
+    ECON_CALENDAR_AVAILABLE = False
+    parse_week_block = None
+    upsert_week_and_events = None
+    get_weeks_in_range = None
+    get_week_raw_text = None
+    get_events_for_date = None
+    generate_event_analysis = None
+    compute_context_hash = None
+    generate_for_week = None
+    get_daily_brief = None
+    delete_week = None
+    DB_PATH = None
+
 # Import path manager for new file layout
 try:
     from path_manager import TWIFOPathManager, get_path_manager
@@ -31,13 +54,14 @@ except ImportError as e:
 
 # Import daily view helper
 try:
-    from twifo_app import get_yesterday_artifacts, get_artifacts_for_date
+    from twifo_app import get_yesterday_artifacts, get_artifacts_for_date, resolve_display_title
     DAILY_VIEW_AVAILABLE = True
 except ImportError as e:
     print(f"[WARN] Daily view helper not available: {e}")
     DAILY_VIEW_AVAILABLE = False
     get_yesterday_artifacts = None
     get_artifacts_for_date = None
+    resolve_display_title = None
 
 # compute today's ISO date once:
 TODAY = datetime.date.today().isoformat()  # e.g. "2025-05-21"
@@ -47,7 +71,7 @@ import urllib.parse
 import dash
 from dash import dcc, html, dash_table, Input, Output, State, ctx
 from dash.exceptions import PreventUpdate
-from flask import request, send_from_directory
+from flask import request, send_from_directory, jsonify, session as flask_session
 from PyPDF2 import PdfReader  # for in-PDF keyword search (beta)
 
 # ── new prefix map & detector ──
@@ -1085,30 +1109,31 @@ def load_rollup_json(rollup_path: Path) -> Optional[dict]:
             # Verify it's actually a rollup by checking schema_version
             schema = data.get("schema_version", "")
             if schema == "twifo.rollup.v1":
-                print(f"[ROLLUP DEBUG] ✓ Successfully loaded {rollup_path.name} (schema: {schema})")
+                print(f"[ROLLUP DEBUG] [OK] Successfully loaded {rollup_path.name} (schema: {schema})")
                 return data
             else:
-                print(f"[ROLLUP DEBUG] ✗ Schema mismatch in {rollup_path.name}")
+                print(f"[ROLLUP DEBUG] [X] Schema mismatch in {rollup_path.name}")
                 print(f"  Expected: 'twifo.rollup.v1'")
                 print(f"  Found: '{schema}' (type: {type(schema).__name__})")
                 print(f"  Top-level keys: {list(data.keys())[:10]}")
                 return None
                 
     except json.JSONDecodeError as e:
-        print(f"[ROLLUP DEBUG] ✗ JSON parse error in {rollup_path.name}")
+        print(f"[ROLLUP DEBUG] [X] JSON parse error in {rollup_path.name}")
         print(f"  Error: {e}")
         print(f"  Line {e.lineno}, Column {e.colno}: {e.msg}")
         return None
     except UnicodeDecodeError as e:
-        print(f"[ROLLUP DEBUG] ✗ Encoding error in {rollup_path.name}")
+        print(f"[ROLLUP DEBUG] [X] Encoding error in {rollup_path.name}")
         print(f"  Error: {e}")
         return None
     except Exception as e:
-        print(f"[ROLLUP DEBUG] ✗ Unexpected error loading {rollup_path.name}")
+        print(f"[ROLLUP DEBUG] [X] Unexpected error loading {rollup_path.name}")
         print(f"  Error type: {type(e).__name__}")
         print(f"  Error message: {e}")
         import traceback
-        print(f"  Traceback: {traceback.format_exc()}")
+        tb_str = traceback.format_exc()
+        print(f"  Traceback: {tb_str.encode('ascii', errors='replace').decode('ascii')}")
         return None
 
 def scan_rollups() -> List[dict]:
@@ -1151,7 +1176,7 @@ def scan_rollups() -> List[dict]:
                 
                 metadata = parse_rollup_filename(fname)
                 if metadata:
-                    print(f"  ✓ Parsed successfully: date={metadata.get('date')}")
+                    print(f"  [OK] Parsed successfully: date={metadata.get('date')}")
                     rollups.append({
                         "path": file_path,
                         "fname": fname,
@@ -1160,12 +1185,14 @@ def scan_rollups() -> List[dict]:
                         "date_yyyymmdd": metadata["date_yyyymmdd"],
                     })
                 else:
-                    print(f"  ✗ Failed to parse filename (does not match expected pattern)")
+                    print(f"  [X] Failed to parse filename (does not match expected pattern)")
                     print(f"    Expected: ROLLUP_DAILY_YYYYMMDD__sum.json")
         except Exception as e:
             print(f"[ROLLUP SCAN] ERROR scanning daily dir: {e}")
             import traceback
-            print(traceback.format_exc())
+            tb_str = traceback.format_exc()
+            # Sanitize for Windows cp1252 console (avoid UnicodeEncodeError on ✓/✗ etc.)
+            print(tb_str.encode("ascii", errors="replace").decode("ascii"))
     else:
         if not os.path.exists(daily_dir):
             print(f"[ROLLUP SCAN] Daily directory does not exist: {daily_dir}")
@@ -1194,7 +1221,7 @@ def scan_rollups() -> List[dict]:
                 
                 metadata = parse_rollup_filename(fname)
                 if metadata:
-                    print(f"  ✓ Parsed successfully: {metadata.get('start_date')} to {metadata.get('end_date')}")
+                    print(f"  [OK] Parsed successfully: {metadata.get('start_date')} to {metadata.get('end_date')}")
                     rollups.append({
                         "path": file_path,
                         "fname": fname,
@@ -1207,12 +1234,13 @@ def scan_rollups() -> List[dict]:
                         "iso_week": metadata["iso_week"],
                     })
                 else:
-                    print(f"  ✗ Failed to parse filename (does not match expected pattern)")
+                    print(f"  [X] Failed to parse filename (does not match expected pattern)")
                     print(f"    Expected: ROLLUP_WEEKLY_YYYYMMDD__sum.json")
         except Exception as e:
             print(f"[ROLLUP SCAN] ERROR scanning weekly dir: {e}")
             import traceback
-            print(traceback.format_exc())
+            tb_str = traceback.format_exc()
+            print(tb_str.encode("ascii", errors="replace").decode("ascii"))
     else:
         if not os.path.exists(weekly_dir):
             print(f"[ROLLUP SCAN] Weekly directory does not exist: {weekly_dir}")
@@ -1512,6 +1540,16 @@ files_layout = html.Div(
                     style={"whiteSpace": "nowrap"}
                 ),
                 
+                # Economic Calendar Admin button
+                dcc.Link(
+                    html.Button(
+                        "📅 Economic Calendar",
+                        className="btn btn-sm btn-outline-info",
+                        style={"whiteSpace": "nowrap"}
+                    ),
+                    href="/admin/economic-calendar"
+                ),
+                
                 # Article counter
                 html.Div(
                     id='article-counter',
@@ -1727,6 +1765,12 @@ app.layout = html.Div([
     dcc.Store(id='daily-selected-artifact', data=""),
     dcc.Store(id='daily-selected-date', data=None),  # Stores selected date as YYYY-MM-DD string
     
+    # Stores for economic calendar admin page
+    dcc.Store(id='econ-dynamics-mode', data=True, storage_type='session'),  # Dynamics on/off
+    # Holds the result of a clientside /api/econ/generate-brief fetch.
+    # Written by the clientside callback; read by render_generated_brief().
+    dcc.Store(id='econ-brief-result-store', data=None),
+    
     # Location for navigation
     dcc.Location(id='url', refresh=True),
 
@@ -1880,8 +1924,8 @@ app.layout = html.Div([
                                             html.Div(
                                                 id="daily-view-sidebar",
                                                 style={
-                                                    "width": "300px",
-                                                    "minWidth": "300px",
+                                                    "width": "360px",
+                                                    "minWidth": "360px",
                                                     "overflowY": "auto",
                                                     "borderRight": "1px solid #ddd",
                                                     "paddingRight": "15px"
@@ -1909,6 +1953,21 @@ app.layout = html.Div([
                                                                     "alignItems": "center"
                                                                 },
                                                                 children=[
+                                                                    html.Button(
+                                                                        "◀",
+                                                                        id="daily-view-date-prev",
+                                                                        n_clicks=0,
+                                                                        style={
+                                                                            "padding": "4px 10px",
+                                                                            "fontSize": "14px",
+                                                                            "backgroundColor": "#f8f9fa",
+                                                                            "color": "#495057",
+                                                                            "border": "1px solid #ddd",
+                                                                            "borderRadius": "4px",
+                                                                            "cursor": "pointer",
+                                                                            "fontWeight": "bold"
+                                                                        }
+                                                                    ),
                                                                     dcc.Input(
                                                                         id='daily-view-date-input',
                                                                         type='text',
@@ -1920,6 +1979,21 @@ app.layout = html.Div([
                                                                             "fontSize": "13px",
                                                                             "border": "1px solid #ddd",
                                                                             "borderRadius": "4px"
+                                                                        }
+                                                                    ),
+                                                                    html.Button(
+                                                                        "▶",
+                                                                        id="daily-view-date-next",
+                                                                        n_clicks=0,
+                                                                        style={
+                                                                            "padding": "4px 10px",
+                                                                            "fontSize": "14px",
+                                                                            "backgroundColor": "#f8f9fa",
+                                                                            "color": "#495057",
+                                                                            "border": "1px solid #ddd",
+                                                                            "borderRadius": "4px",
+                                                                            "cursor": "pointer",
+                                                                            "fontWeight": "bold"
                                                                         }
                                                                     ),
                                                                     html.Button(
@@ -1940,6 +2014,33 @@ app.layout = html.Div([
                                                             )
                                                         ]
                                                     ),
+                                                    
+                                                    # Dynamics mode toggle (Economic Calendar)
+                                                    html.Div(
+                                                        style={
+                                                            "marginTop": "10px",
+                                                            "marginBottom": "15px",
+                                                            "padding": "8px 10px",
+                                                            "backgroundColor": "#f0f4ff",
+                                                            "borderRadius": "4px",
+                                                            "border": "1px solid #c3d0f0",
+                                                            "fontSize": "12px"
+                                                        },
+                                                        children=[
+                                                            html.Span("Dynamics: ", style={"fontWeight": "600", "marginRight": "6px"}),
+                                                            dcc.RadioItems(
+                                                                id="daily-view-dynamics-toggle",
+                                                                options=[
+                                                                    {"label": " On", "value": True},
+                                                                    {"label": " Off", "value": False},
+                                                                ],
+                                                                value=True,
+                                                                inline=True,
+                                                                labelStyle={"marginRight": "10px", "cursor": "pointer", "fontSize": "12px"},
+                                                            ),
+                                                        ]
+                                                    ),
+                                                    
                                                     html.Div(id="daily-view-article-list")
                                                 ]
                                             ),
@@ -1985,6 +2086,127 @@ app.layout = html.Div([
                                         style={"display": "none"},
                                         children=[]
                                     )
+                                ]
+                            )
+                        ]
+                    ),
+                    
+                    # ---- TAB 3: ECONOMIC CALENDAR ADMIN ----
+                    dcc.Tab(
+                        label='Economic Calendar',
+                        value='econ-calendar',
+                        style=TAB_STYLE,
+                        selected_style=SELECTED_TAB_STYLE,
+                        children=[
+                            html.Div(
+                                id="econ-admin-container",
+                                style={"padding": "20px", "maxWidth": "1200px", "margin": "0 auto"},
+                                children=[
+                                    # DB health banner – populated on tab open
+                                    html.Div(id="econ-db-health-banner"),
+
+                                    html.H2("Economic Calendar Import", 
+                                           style={"color": "#0056B3", "marginBottom": "10px"}),
+
+                                    # Dynamics mode toggle row
+                                    html.Div([
+                                        html.Label(
+                                            "Dynamics mode:",
+                                            style={"fontWeight": "bold", "marginRight": "10px",
+                                                   "verticalAlign": "middle"}
+                                        ),
+                                        dcc.RadioItems(
+                                            id="econ-dynamics-toggle",
+                                            options=[
+                                                {"label": " On ", "value": True},
+                                                {"label": " Off", "value": False},
+                                            ],
+                                            value=True,
+                                            inline=True,
+                                            labelStyle={"marginRight": "12px", "cursor": "pointer"},
+                                        ),
+                                        html.Span(
+                                            "When off, Dynamics explainers are skipped and only Theory is shown.",
+                                            style={"fontSize": "12px", "color": "#666",
+                                                   "marginLeft": "16px", "fontStyle": "italic"}
+                                        ),
+                                    ], style={"display": "flex", "alignItems": "center",
+                                              "marginBottom": "20px",
+                                              "padding": "10px 14px",
+                                              "backgroundColor": "#f0f4ff",
+                                              "borderRadius": "4px",
+                                              "border": "1px solid #c3d0f0"}),
+                                    
+                                    # Paste area
+                                    html.Div([
+                                        html.Label("Paste Weekly Calendar Text:",
+                                                  style={"fontWeight": "bold", "marginBottom": "5px", "display": "block"}),
+                                        dcc.Textarea(
+                                            id="econ-textarea",
+                                            placeholder="Sunday, February 22 to Saturday, February 28, 2026\n\nMonday, February 23, 2026\n10:00 Event Title",
+                                            style={
+                                                "width": "100%",
+                                                "height": "200px",
+                                                "fontFamily": "monospace",
+                                                "fontSize": "13px",
+                                                "padding": "10px",
+                                                "border": "1px solid #ccc",
+                                                "borderRadius": "4px"
+                                            }
+                                        )
+                                    ], style={"marginBottom": "15px"}),
+                                    
+                                    # Buttons
+                                    html.Div([
+                                        html.Button(
+                                            "Parse",
+                                            id="econ-parse-btn",
+                                            className="btn btn-primary",
+                                            style={"marginRight": "10px"}
+                                        ),
+                                        html.Button(
+                                            "Save",
+                                            id="econ-save-btn",
+                                            className="btn btn-success",
+                                            disabled=True,
+                                            style={"marginRight": "10px"}
+                                        ),
+                                        html.Button(
+                                            "Clear",
+                                            id="econ-clear-btn",
+                                            className="btn btn-secondary"
+                                        ),
+                                    ], style={"marginBottom": "20px"}),
+                                    
+                                    # Status area
+                                    html.Div(id="econ-status", style={"marginBottom": "10px"}),
+
+                                    # AI generation progress area (shown only during generation)
+                                    html.Div(
+                                        id="econ-gen-progress",
+                                        style={"marginBottom": "20px"},
+                                        children=[]
+                                    ),
+
+                                    # Interval that polls generation progress (disabled by default)
+                                    dcc.Interval(
+                                        id="econ-gen-interval",
+                                        interval=800,       # ms between polls
+                                        n_intervals=0,
+                                        disabled=True,
+                                    ),
+
+                                    # Store: holds generation job state
+                                    # {dates, dynamics_mode, completed, total, results, done}
+                                    dcc.Store(id="econ-gen-job-store", data=None),
+                                    
+                                    # Divider
+                                    html.Hr(style={"margin": "30px 0"}),
+                                    
+                                    # Recently imported weeks
+                                    html.H3("Recently Imported Weeks",
+                                           style={"color": "#0056B3", "marginBottom": "15px"}),
+                                    html.Div(id="econ-weeks-list")
                                 ]
                             )
                         ]
@@ -2212,23 +2434,23 @@ def update_file_table(
         
         # Apply date range filter
         if start_date and rollup_date < datetime.datetime.fromisoformat(start_date).date():
-            print(f"  ✗ Filtered out by date range (before start_date: {start_date})")
+            print(f"  [X] Filtered out by date range (before start_date: {start_date})")
             continue
         if end_date and rollup_date > datetime.datetime.fromisoformat(end_date).date():
-            print(f"  ✗ Filtered out by date range (after end_date: {end_date})")
+            print(f"  [X] Filtered out by date range (after end_date: {end_date})")
             continue
         
         # Load rollup JSON for UI data
         rollup_json = load_rollup_json(Path(rollup_info["path"]))
         if rollup_json is None:
-            print(f"  ✗ Failed to load JSON - skipping this rollup")
+            print(f"  [X] Failed to load JSON - skipping this rollup")
             continue
         
         ui_data = rollup_json.get("ui", {})
         if not ui_data:
             print(f"  ⚠ WARNING: Rollup JSON loaded but 'ui' key is missing or empty")
         else:
-            print(f"  ✓ Successfully loaded, UI title: {ui_data.get('title', 'N/A')}")
+            print(f"  [OK] Successfully loaded, UI title: {ui_data.get('title', 'N/A')}")
         
         summary_type = "daily" if rollup_info["kind"] == "rollup_daily" else "weekly"
         # Build relative path for view links
@@ -2792,6 +3014,167 @@ def download_file():
 
 
 ############################
+# 8a) ECON BRIEF API
+############################
+
+# ---------------------------------------------------------------------------
+# POST /api/econ/generate-brief
+#
+# Request JSON body:
+#   { "date_iso": "YYYY-MM-DD", "dynamics_mode": true }
+#
+# Auth: caller must be logged-in (login-status session cookie is set by Dash).
+#       We validate via the Dash session store value that Dash writes to the
+#       Flask session under the key "login_user".  If that key is absent or
+#       empty, we return 401.
+#
+# Idempotency:
+#   A per-date threading.Lock prevents two simultaneous calls from both
+#   reaching the LLM.  The second caller blocks, then reads the row that
+#   the first caller already committed and returns it without a second write.
+#
+# Response JSON (success 200):
+#   { "date_iso": "...", "theory_text": "...", "dynamics_text": "..." }
+#
+# Response JSON (error):
+#   { "error": "..." }   with appropriate HTTP status code.
+# ---------------------------------------------------------------------------
+@server.route("/api/econ/generate-brief", methods=["POST"])
+def api_generate_brief():
+    """
+    Generate (or return cached) economic brief for a given date.
+
+    Only callable by authenticated users.  Uses a per-date lock so that
+    N simultaneous requests produce exactly one LLM call and one DB write.
+    """
+    # ── Auth guard ────────────────────────────────────────────────────────
+    # Dash writes the logged-in username into the Flask session under
+    # the key "_dash_login_user" via dcc.Store(storage_type='session').
+    # We check the raw Flask session; if the user is not logged in the
+    # session key will be absent.
+    login_user = flask_session.get("login_user", "")
+    if not login_user:
+        # Fallback: accept if the request carries an X-Login-User header
+        # (set by the clientside callback below as a lightweight signal).
+        login_user = request.headers.get("X-Login-User", "")
+    if not login_user:
+        print("[ECON API] /api/econ/generate-brief called without authentication")
+        return jsonify({"error": "Authentication required"}), 401
+
+    # ── Parse request body ────────────────────────────────────────────────
+    body = request.get_json(silent=True) or {}
+    date_iso = (body.get("date_iso") or "").strip()
+    dynamics_mode = bool(body.get("dynamics_mode", True))
+
+    if not date_iso:
+        return jsonify({"error": "date_iso is required"}), 400
+
+    # Validate date format
+    try:
+        import datetime as _dt
+        _dt.datetime.strptime(date_iso, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": f"Invalid date_iso format: {date_iso!r}. Expected YYYY-MM-DD"}), 400
+
+    print(f"[ECON API] generate-brief requested: date_key={date_iso}, user={login_user}, dynamics_mode={dynamics_mode}")
+
+    if not ECON_CALENDAR_AVAILABLE:
+        return jsonify({"error": "Economic calendar module not available"}), 503
+
+    # ── Check if events exist for this date ───────────────────────────────
+    try:
+        events = get_events_for_date(DB_PATH, date_iso)
+    except Exception as exc:
+        print(f"[ECON API] get_events_for_date failed for {date_iso}: {exc}")
+        return jsonify({"error": "Database error checking events"}), 500
+
+    if not events:
+        return jsonify({"error": f"No economic events found for {date_iso}"}), 404
+
+    # ── Acquire per-date lock ─────────────────────────────────────────────
+    # This is the idempotency guard.  If two requests arrive simultaneously:
+    #   Request A acquires the lock → calls LLM → writes DB → releases lock.
+    #   Request B blocks on acquire → lock released → reads the row A wrote
+    #   → returns it without calling the LLM a second time.
+    date_lock = _get_brief_lock(date_iso)
+    acquired = date_lock.acquire(timeout=60)   # max 60 s wait
+    if not acquired:
+        return jsonify({"error": "Timed out waiting for brief generation lock. Try again."}), 503
+
+    try:
+        # ── Re-check after acquiring lock (second caller fast-path) ───────
+        # If the first caller already wrote the brief, return it directly.
+        try:
+            existing = get_daily_brief(DB_PATH, date_iso)
+        except Exception:
+            existing = None
+
+        _ERROR_PREFIXES = (
+            "brief generation unavailable",
+            "summary unavailable",
+            "summary generation failed",
+            "error code:",
+        )
+        existing_theory = (existing or {}).get("theory_text", "").strip()
+        existing_is_valid = existing_theory and not any(
+            existing_theory.lower().startswith(p) for p in _ERROR_PREFIXES
+        )
+
+        if existing_is_valid:
+            print(f"[ECON API] Brief already exists for date_key={date_iso} (written by concurrent request), returning cached")
+            return jsonify({
+                "date_iso": date_iso,
+                "theory_text": existing_theory,
+                "dynamics_text": (existing or {}).get("dynamics_text", "").strip(),
+                "source": "cache",
+            }), 200
+
+        # ── Generate brief (we are the first caller or cache was invalid) ─
+        print(f"[ECON API] Starting brief generation for date_key={date_iso}")
+        try:
+            from econ_calendar_ai import generate_for_date as _gen_for_date
+            rollups_dir = Path(FILES_DIR) / "rollups" / "daily"
+            gen_result = _gen_for_date(
+                date_iso,
+                dynamics_mode=dynamics_mode,
+                db_path=DB_PATH,
+                rollups_daily_dir=rollups_dir,
+            )
+        except Exception as exc:
+            import traceback
+            print(f"[ECON API] generate_for_date raised for {date_iso}: {exc}\n{traceback.format_exc()}")
+            return jsonify({"error": f"Generation error: {str(exc)[:200]}"}), 500
+
+        if gen_result.get("error"):
+            print(f"[ECON API] generate_for_date returned error for {date_iso}: {gen_result['error']}")
+            return jsonify({"error": gen_result["error"]}), 500
+
+        # ── Read back what was written ─────────────────────────────────────
+        try:
+            saved = get_daily_brief(DB_PATH, date_iso)
+        except Exception as exc:
+            print(f"[ECON API] get_daily_brief after generation failed for {date_iso}: {exc}")
+            return jsonify({"error": "Brief generated but could not be read back"}), 500
+
+        if not saved:
+            return jsonify({"error": "Brief generation completed but no row found in DB"}), 500
+
+        theory_text = saved.get("theory_text", "").strip()
+        dynamics_text = saved.get("dynamics_text", "").strip()
+
+        print(f"[ECON API] Brief generation SUCCESS for date_key={date_iso}: theory_len={len(theory_text)}, dynamics_len={len(dynamics_text)}")
+        return jsonify({
+            "date_iso": date_iso,
+            "theory_text": theory_text,
+            "dynamics_text": dynamics_text,
+            "source": "generated",
+        }), 200
+
+    finally:
+        date_lock.release()
+
+
+############################
 # 8) SUMMARY VIEW CALLBACKS
 ############################
 
@@ -2902,8 +3285,1081 @@ def display_page(pathname):
 
 
 ############################
-# 8) DAILY VIEW CALLBACKS
+# 8) ECONOMIC CALENDAR CALLBACKS
 ############################
+
+# ── Dynamics-mode toggle → persist to store ───────────────────────────────────
+@app.callback(
+    Output("econ-dynamics-mode", "data"),
+    [
+        Input("econ-dynamics-toggle", "value"),
+        Input("daily-view-dynamics-toggle", "value"),
+    ],
+    prevent_initial_call=True,
+)
+def update_dynamics_mode(admin_value, daily_value):
+    """Sync RadioItems value to session store from either toggle."""
+    triggered = ctx.triggered_id
+    if triggered == "econ-dynamics-toggle":
+        return admin_value
+    elif triggered == "daily-view-dynamics-toggle":
+        return daily_value
+    raise PreventUpdate
+
+
+# ── Sync store back to Daily View toggle on tab switch ────────────────────────
+# NOTE: Uses State for econ-dynamics-mode to avoid circular dependency.
+# The sync only triggers when tab changes, not when the store changes.
+@app.callback(
+    Output("daily-view-dynamics-toggle", "value"),
+    Input("main-tabs", "value"),
+    State("econ-dynamics-mode", "data"),
+    prevent_initial_call=True,
+)
+def sync_daily_view_toggle(tab_value, mode_value):
+    """Ensure Daily View toggle reflects the session store when tab opens."""
+    if tab_value == "daily-view":
+        return mode_value if mode_value is not None else True
+    raise PreventUpdate
+
+
+# ── On-demand Theory explainer ────────────────────────────────────────────────
+@app.callback(
+    [
+        Output({"type": "econ-theory-content", "index": dash.dependencies.MATCH}, "children"),
+        Output({"type": "econ-theory-content", "index": dash.dependencies.MATCH}, "style"),
+        Output({"type": "econ-expand-theory", "index": dash.dependencies.MATCH}, "children"),
+    ],
+    Input({"type": "econ-expand-theory", "index": dash.dependencies.MATCH}, "n_clicks"),
+    [
+        State({"type": "econ-theory-content", "index": dash.dependencies.MATCH}, "style"),
+        State({"type": "econ-rollup-ctx", "index": dash.dependencies.ALL}, "data"),
+    ],
+    prevent_initial_call=True,
+)
+def fetch_theory_explainer(n_clicks, current_style, all_ctx_data):
+    """Generate Theory blurb on first click; toggle visibility on subsequent clicks."""
+    if not n_clicks:
+        raise PreventUpdate
+
+    is_visible = (current_style or {}).get("display") != "none"
+    
+    # Odd clicks = hide, even clicks = show (since content starts visible)
+    # But first click should load content, not hide
+    # Use n_clicks to determine: first click (n_clicks=1) loads, subsequent toggle
+    if n_clicks > 1:
+        # Toggle visibility after first load
+        if is_visible:
+            return dash.no_update, {"paddingLeft": "14px", "display": "none"}, "▶ Theory"
+        else:
+            return dash.no_update, {"paddingLeft": "14px", "display": "block"}, "▼ Theory"
+
+    # Find rollup context (first non-None entry matching this panel's date)
+    ctx_data = next((d for d in all_ctx_data if d), None)
+    evt_id = ctx.triggered_id["index"] if ctx.triggered_id else None
+
+    if not ECON_CALENDAR_AVAILABLE or not evt_id:
+        content = _econ_blurb_unavailable()
+        return content, {"paddingLeft": "14px", "display": "block"}, "▼ Theory"
+
+    # Look up the event row from DB
+    try:
+        conn = __import__("econ_calendar_db").get_connection(DB_PATH)
+        row = conn.execute(
+            "SELECT id, title, country_or_region, currency_tag, event_date FROM econ_event WHERE id = ?",
+            (evt_id,),
+        ).fetchone()
+        conn.close()
+    except Exception as exc:
+        print(f"[ECON] DB read failed for event {evt_id}: {exc}")
+        return _econ_db_error_banner(exc), {"paddingLeft": "14px", "display": "block"}, "▼ Theory"
+
+    if not row:
+        return _econ_blurb_unavailable(), {"paddingLeft": "14px", "display": "block"}, "▼ Theory"
+
+    evt = dict(row)
+    as_of_date = evt.get("event_date", datetime.date.today().isoformat())
+
+    # Rebuild rollup_json shell from stored context text for context_hash
+    rollup_json_shell = None
+    if ctx_data:
+        rollup_json_shell = {"_ctx": ctx_data}  # analysis module uses compute_context_hash which handles this
+
+    try:
+        analysis = generate_event_analysis(
+            event=evt,
+            as_of_date=as_of_date,
+            rollup_json=rollup_json_shell,
+            db_path=DB_PATH,
+            theory_only=True,
+        )
+        text = analysis.get("theory_text", "Analysis unavailable.")
+    except Exception as exc:
+        print(f"[ECON] Theory generation failed for {evt_id}: {exc}")
+        text = f"Generation error: {exc}"
+
+    content = _econ_blurb_lines(text)
+    return content, {"paddingLeft": "14px", "display": "block"}, "▼ Theory"
+
+
+# ── On-demand Dynamics explainer ──────────────────────────────────────────────
+@app.callback(
+    [
+        Output({"type": "econ-dynamics-content", "index": dash.dependencies.MATCH}, "children"),
+        Output({"type": "econ-dynamics-content", "index": dash.dependencies.MATCH}, "style"),
+        Output({"type": "econ-expand-dynamics", "index": dash.dependencies.MATCH}, "children"),
+    ],
+    Input({"type": "econ-expand-dynamics", "index": dash.dependencies.MATCH}, "n_clicks"),
+    [
+        State({"type": "econ-dynamics-content", "index": dash.dependencies.MATCH}, "style"),
+        State({"type": "econ-rollup-ctx", "index": dash.dependencies.ALL}, "data"),
+        State("econ-dynamics-mode", "data"),
+    ],
+    prevent_initial_call=True,
+)
+def fetch_dynamics_explainer(n_clicks, current_style, all_ctx_data, dynamics_on):
+    """Generate Dynamics blurb on first click; toggle visibility on subsequent clicks."""
+    if not n_clicks:
+        raise PreventUpdate
+
+    if not dynamics_on:
+        # Dynamics mode is off – show a brief note instead
+        note = html.P(
+            "Dynamics mode is currently off. Enable it in the Daily View sidebar or Economic Calendar admin tab.",
+            style={"fontSize": "12px", "color": "#6c757d", "fontStyle": "italic", "paddingLeft": "14px"},
+        )
+        return note, {"display": "block"}, "▼ Dynamics"
+
+    is_visible = (current_style or {}).get("display") != "none"
+    
+    # First click (n_clicks=1) loads content, subsequent clicks toggle visibility
+    if n_clicks > 1:
+        if is_visible:
+            return dash.no_update, {"paddingLeft": "14px", "display": "none"}, "▶ Dynamics"
+        else:
+            return dash.no_update, {"paddingLeft": "14px", "display": "block"}, "▼ Dynamics"
+
+    ctx_data = next((d for d in all_ctx_data if d), None)
+    evt_id = ctx.triggered_id["index"] if ctx.triggered_id else None
+
+    if not ECON_CALENDAR_AVAILABLE or not evt_id:
+        content = _econ_blurb_unavailable()
+        return content, {"paddingLeft": "14px", "display": "block"}, "▼ Dynamics"
+
+    try:
+        conn = __import__("econ_calendar_db").get_connection(DB_PATH)
+        row = conn.execute(
+            "SELECT id, title, country_or_region, currency_tag, event_date FROM econ_event WHERE id = ?",
+            (evt_id,),
+        ).fetchone()
+        conn.close()
+    except Exception as exc:
+        print(f"[ECON] DB read failed for event {evt_id}: {exc}")
+        return _econ_db_error_banner(exc), {"paddingLeft": "14px", "display": "block"}, "▼ Dynamics"
+
+    if not row:
+        return _econ_blurb_unavailable(), {"paddingLeft": "14px", "display": "block"}, "▼ Dynamics"
+
+    evt = dict(row)
+    as_of_date = evt.get("event_date", datetime.date.today().isoformat())
+    rollup_json_shell = {"_ctx": ctx_data} if ctx_data else None
+
+    try:
+        analysis = generate_event_analysis(
+            event=evt,
+            as_of_date=as_of_date,
+            rollup_json=rollup_json_shell,
+            db_path=DB_PATH,
+            theory_only=False,
+        )
+        text = analysis.get("dynamics_text", "Analysis unavailable.")
+        no_ctx = analysis.get("no_context", False)
+    except Exception as exc:
+        print(f"[ECON] Dynamics generation failed for {evt_id}: {exc}")
+        text = f"Generation error: {exc}"
+        no_ctx = False
+
+    content_parts = _econ_blurb_lines(text)
+    if no_ctx:
+        content_parts = [
+            html.P(
+                "ℹ️ No current rollup context available; dynamics are theory-based only.",
+                style={"fontSize": "11px", "color": "#856404", "marginBottom": "4px", "fontStyle": "italic"},
+            )
+        ] + content_parts
+
+    return content_parts, {"paddingLeft": "14px", "display": "block"}, "▼ Dynamics"
+
+
+def _econ_blurb_lines(text: str) -> list:
+    """Convert multi-line blurb text to a list of Dash P elements."""
+    return [
+        html.P(line, style={"margin": "2px 0", "fontSize": "13px", "lineHeight": "1.5"})
+        for line in text.splitlines()
+        if line.strip()
+    ] or [html.P("No content generated.", style={"fontSize": "13px", "color": "#666"})]
+
+
+def _econ_blurb_unavailable() -> html.P:
+    """Fallback component when analysis cannot be retrieved."""
+    return html.P(
+        "Analysis unavailable.",
+        style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+    )
+
+
+# ── Generate Brief button — clientside fetch → store ──────────────────────────
+#
+# Flow:
+#   1. User clicks "Generate Brief" button.
+#   2. Clientside callback fires immediately, sets button to "Generating…"
+#      and calls POST /api/econ/generate-brief with the date and login-user.
+#   3. On success the API returns { theory_text, dynamics_text }.
+#      The clientside callback writes { date, theory_text, dynamics_text }
+#      into the hidden dcc.Store("econ-brief-result-store").
+#   4. A server-side callback reads the store and replaces the entire
+#      econ-brief-status div with the rendered brief text inline.
+#      No page refresh required.
+#
+# Why clientside for the fetch?
+#   Dash server-side callbacks cannot call external HTTP endpoints without
+#   blocking the Dash worker thread for the full LLM round-trip (~5-30 s).
+#   A clientside callback runs in the browser and uses the native fetch API,
+#   so the Dash server stays free while the LLM call is in flight.
+# ─────────────────────────────────────────────────────────────────────────────
+
+app.clientside_callback(
+    """
+    async function(n_clicks, login_user) {
+        if (!n_clicks) return window.dash_clientside.no_update;
+
+        // Extract date from the triggered button's id
+        const triggered = dash_clientside.callback_context.triggered;
+        if (!triggered || triggered.length === 0) return window.dash_clientside.no_update;
+
+        let btnId;
+        try { btnId = JSON.parse(triggered[0].prop_id.split('.')[0]); }
+        catch(e) { return {error: 'Invalid button id'}; }
+
+        const dateIso = btnId.date;
+        if (!dateIso) return {error: 'No date in button id'};
+
+        // Disable the button during generation (cosmetic only — no Dash output needed)
+        const btnEl = document.querySelector(
+            '[id*=\'"type":"econ-gen-brief-btn"\'][id*=\'"date":"' + dateIso + '"\']'
+        );
+        if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Generating…'; }
+
+        try {
+            const resp = await fetch('/api/econ/generate-brief', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Login-User': login_user || ''
+                },
+                body: JSON.stringify({ date_iso: dateIso, dynamics_mode: true })
+            });
+            const data = await resp.json();
+
+            if (!resp.ok) {
+                return { date: dateIso, error: data.error || ('HTTP ' + resp.status) };
+            }
+            return {
+                date: dateIso,
+                theory_text: data.theory_text || '',
+                dynamics_text: data.dynamics_text || '',
+                source: data.source || 'generated'
+            };
+        } catch(err) {
+            return { date: dateIso, error: String(err) };
+        } finally {
+            if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Generate Brief'; }
+        }
+    }
+    """,
+    Output("econ-brief-result-store", "data"),
+    Input({"type": "econ-gen-brief-btn", "date": dash.dependencies.ALL}, "n_clicks"),
+    State("login-user", "data"),
+    prevent_initial_call=True,
+)
+
+
+@app.callback(
+    Output({"type": "econ-brief-status", "date": dash.dependencies.ALL}, "children"),
+    Input("econ-brief-result-store", "data"),
+    State({"type": "econ-brief-status", "date": dash.dependencies.ALL}, "id"),
+    prevent_initial_call=True,
+)
+def render_generated_brief(result_data, status_ids):
+    """
+    Receive the brief returned by the API (via the clientside fetch) and
+    replace the 'Summary pending' placeholder with the actual brief text.
+    Only the matching date's div is updated; all others get no_update.
+    """
+    if not result_data:
+        raise PreventUpdate
+
+    target_date = result_data.get("date")
+    if not target_date:
+        raise PreventUpdate
+
+    outputs = []
+    for sid in (status_ids or []):
+        sid_date = sid.get("date") if isinstance(sid, dict) else None
+        if sid_date != target_date:
+            outputs.append(dash.no_update)
+            continue
+
+        # Error path
+        if result_data.get("error"):
+            err_msg = result_data["error"]
+            print(f"[ECON GEN] Clientside fetch returned error for date_key={target_date}: {err_msg}")
+            outputs.append(
+                html.Span(
+                    f"Generation failed: {err_msg[:120]}",
+                    style={"fontSize": "11px", "color": "#dc3545"},
+                )
+            )
+            continue
+
+        theory_text = (result_data.get("theory_text") or "").strip()
+        dynamics_text = (result_data.get("dynamics_text") or "").strip()
+        source = result_data.get("source", "generated")
+        print(f"[ECON GEN] Rendering inline brief for date_key={target_date}: theory_len={len(theory_text)}, source={source}")
+
+        if not theory_text:
+            outputs.append(
+                html.Span(
+                    "Generation returned empty brief. Try again.",
+                    style={"fontSize": "11px", "color": "#856404"},
+                )
+            )
+            continue
+
+        # Render the brief inline — same style as _render_econ_daily_brief
+        theory_lines = [
+            html.P(line, style={"margin": "2px 0", "fontSize": "13px", "lineHeight": "1.55"})
+            for line in theory_text.splitlines()
+            if line.strip()
+        ]
+        brief_block = html.Div(
+            [
+                html.Hr(style={"margin": "16px 0", "border": "none", "borderTop": "1px solid #e0e7ef"}),
+                html.H3(
+                    "Summary:",
+                    style={"fontSize": "17px", "color": "#004080", "marginBottom": "10px"},
+                ),
+                html.Div(
+                    theory_lines,
+                    style={
+                        "backgroundColor": "#f8f9fa",
+                        "padding": "12px 16px",
+                        "borderRadius": "4px",
+                        "marginBottom": "6px",
+                        "borderLeft": "4px solid #004080",
+                    },
+                ),
+            ]
+        )
+        outputs.append(brief_block)
+
+    return outputs
+
+
+# ── Admin parse callback ───────────────────────────────────────────────────────
+@app.callback(
+    [
+        Output("econ-status", "children"),
+        Output("econ-save-btn", "disabled"),
+    ],
+    Input("econ-parse-btn", "n_clicks"),
+    State("econ-textarea", "value"),
+    prevent_initial_call=True
+)
+def parse_economic_calendar(n_clicks, raw_text):
+    """Parse pasted economic calendar text (simplified - no big preview)."""
+    if not ECON_CALENDAR_AVAILABLE:
+        return (
+            html.Div("Economic calendar module not available", 
+                    style={"color": "#dc3545", "padding": "10px", "backgroundColor": "#f8d7da", "borderRadius": "4px"}),
+            True
+        )
+    
+    if not raw_text or not raw_text.strip():
+        return (
+            html.Div("Please paste calendar text", 
+                    style={"color": "#856404", "padding": "10px", "backgroundColor": "#fff3cd", "borderRadius": "4px"}),
+            True
+        )
+    
+    try:
+        parsed = parse_week_block(raw_text)
+        
+        # Success message (minimal)
+        status = html.Div([
+            html.Span("✓ ", style={"fontSize": "18px"}),
+            html.Span(f"Parsed successfully: {parsed.week_start_date} to {parsed.week_end_date}"),
+            html.Span(f" ({len(parsed.events)} events)", style={"color": "#666"}),
+            html.Br(),
+            html.Span("Ready to save.", style={"fontSize": "13px", "color": "#666", "marginTop": "4px"})
+        ], style={"color": "#155724", "padding": "10px", "backgroundColor": "#d4edda", "borderRadius": "4px"})
+        
+        return status, False  # Enable save button
+        
+    except ValueError as e:
+        error_msg = str(e)
+        return (
+            html.Div([
+                html.Span("✗ ", style={"fontSize": "18px"}),
+                html.Span("Parse error: ", style={"fontWeight": "bold"}),
+                html.Span(error_msg)
+            ], style={"color": "#721c24", "padding": "10px", "backgroundColor": "#f8d7da", "borderRadius": "4px"}),
+            True
+        )
+
+
+@app.callback(
+    [
+        Output("econ-status", "children", allow_duplicate=True),
+        Output("econ-gen-job-store", "data"),
+        Output("econ-gen-interval", "disabled"),
+        Output("econ-gen-progress", "children"),
+    ],
+    Input("econ-save-btn", "n_clicks"),
+    [
+        State("econ-textarea", "value"),
+        State("econ-dynamics-toggle", "value"),
+    ],
+    prevent_initial_call=True,
+)
+def save_economic_calendar(n_clicks, raw_text, dynamics_mode):
+    """
+    Save parsed economic calendar to the DB, then pre-generate ranked event
+    lists and daily briefs for every date in the week via the AI pipeline.
+
+    Step 1: Parse + upsert week and events (synchronous, fast).
+    Step 2: Collect unique event dates and launch sequential AI generation
+            across all dates (Steps A, B, C per date). Progress is polled
+            via dcc.Interval so the UI updates without freezing.
+    """
+    _no_op = (dash.no_update, dash.no_update, dash.no_update, dash.no_update)
+
+    if not ECON_CALENDAR_AVAILABLE or not raw_text or not raw_text.strip():
+        return (
+            html.Div(
+                "No data to save",
+                style={"color": "#856404", "padding": "10px",
+                       "backgroundColor": "#fff3cd", "borderRadius": "4px"},
+            ),
+            None, True, [],
+        )
+
+    # ── Step 1: Parse + DB upsert ──────────────────────────────────────────
+    try:
+        parsed = parse_week_block(raw_text)
+        print(f"[ECON] Parsed week: {parsed.week_start_date} to {parsed.week_end_date}, {len(parsed.events)} events")
+        
+        # Add retry logic for database locking
+        max_retries = 3
+        retry_delay = 0.5
+        for attempt in range(max_retries):
+            try:
+                upsert_week_and_events(
+                    DB_PATH,
+                    parsed.week_start_date,
+                    parsed.week_end_date,
+                    raw_text,
+                    parsed.events,
+                )
+                print(f"[ECON] Successfully saved week to database")
+                break
+            except Exception as db_exc:
+                err_str = str(db_exc).lower()
+                if "locked" in err_str and attempt < max_retries - 1:
+                    print(f"[ECON] Database locked, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    raise  # Re-raise if not a locking issue or out of retries
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[ECON] Save error: {exc}\n{tb}")
+        err_msg = str(exc)
+        if "locked" in err_msg.lower():
+            hint = " The database appears locked — close any other connections and retry."
+        elif "unable to open" in err_msg.lower() or "no such file" in err_msg.lower():
+            hint = f" Database file not found at: {DB_PATH}"
+        else:
+            hint = ""
+        return (
+            html.Div(
+                [
+                    html.Span("✗ ", style={"fontSize": "18px"}),
+                    html.Span("Save error: ", style={"fontWeight": "bold"}),
+                    html.Span(err_msg + hint),
+                ],
+                style={"color": "#721c24", "padding": "10px",
+                       "backgroundColor": "#f8d7da", "borderRadius": "4px"},
+            ),
+            None, True, [],
+        )
+
+    # Collect unique event dates (sorted ascending)
+    unique_dates = sorted({evt.event_date for evt in parsed.events})
+    total_dates = len(unique_dates)
+
+    print(
+        f"[ECON] Save: {len(parsed.events)} events across {total_dates} dates "
+        f"({parsed.week_start_date} to {parsed.week_end_date})"
+    )
+
+    # Format week label for UI (no hyphens in date display)
+    try:
+        s_dt = datetime.datetime.strptime(parsed.week_start_date, "%Y-%m-%d")
+        e_dt = datetime.datetime.strptime(parsed.week_end_date, "%Y-%m-%d")
+        week_label = f"{s_dt.strftime('%b %d %Y')} to {e_dt.strftime('%b %d %Y')}"
+    except Exception:
+        week_label = f"{parsed.week_start_date} to {parsed.week_end_date}"
+
+    save_ok_msg = html.Div(
+        [
+            html.Span("✓ ", style={"fontSize": "16px"}),
+            html.Span(f"Saved week {week_label}"),
+            html.Span(f" ({len(parsed.events)} events)", style={"color": "#666"}),
+        ],
+        style={"color": "#155724", "padding": "8px 10px",
+               "backgroundColor": "#d4edda", "borderRadius": "4px",
+               "marginBottom": "6px"},
+    )
+
+    if not unique_dates:
+        return save_ok_msg, None, True, []
+
+    # Build rollups daily dir path (same FILES_DIR constant used throughout the app)
+    rollups_daily_dir = Path(FILES_DIR) / "rollups" / "daily"
+
+    # ── Step 2: Kick off sequential AI generation ──────────────────────────
+    # Run generation in a background thread so Dash can return immediately.
+    # Progress is tracked in the job store and polled by the interval callback.
+    import threading
+
+    job_store: dict = {
+        "dates": unique_dates,
+        "dynamics_mode": bool(dynamics_mode),
+        "completed": 0,
+        "total": total_dates,
+        "results": [],
+        "done": False,
+        "rollups_daily_dir": str(rollups_daily_dir),
+    }
+
+    def _run_generation(store: dict) -> None:
+        """Run generation for all dates and update the shared store."""
+        print(f"[ECON GEN THREAD] Starting generation for {len(store['dates'])} dates")
+        dates = store.get("dates", [])
+        d_mode = store.get("dynamics_mode", True)
+        r_dir_str = store.get("rollups_daily_dir", "")
+        
+        # Ensure results list exists and is initialized
+        if "results" not in store:
+            store["results"] = []
+        if "completed" not in store:
+            store["completed"] = 0
+        
+        try:
+            r_dir = Path(r_dir_str) if r_dir_str else None
+            for i, date_iso in enumerate(dates):
+                print(f"[ECON GEN THREAD] Processing date {i+1}/{len(dates)}: {date_iso}")
+                res = None
+                try:
+                    from econ_calendar_ai import generate_for_date  # noqa: PLC0415
+                    print(f"[ECON GEN THREAD] Calling generate_for_date for {date_iso}...")
+                    res = generate_for_date(
+                        date_iso,
+                        dynamics_mode=d_mode,
+                        db_path=DB_PATH,
+                        rollups_daily_dir=r_dir,
+                    )
+                    # Validate result is a dict with required keys
+                    if not isinstance(res, dict):
+                        print(f"[ECON GEN THREAD] WARNING: generate_for_date returned non-dict: {type(res)}")
+                        res = {
+                            "date_iso": date_iso,
+                            "error": f"Invalid result type: {type(res).__name__}",
+                            "skipped_rank": False,
+                            "skipped_brief": False,
+                            "events_count": 0
+                        }
+                    else:
+                        # Ensure all required keys exist
+                        if "date_iso" not in res:
+                            res["date_iso"] = date_iso
+                        if "error" not in res:
+                            res["error"] = None
+                        if "skipped_rank" not in res:
+                            res["skipped_rank"] = False
+                        if "skipped_brief" not in res:
+                            res["skipped_brief"] = False
+                        if "events_count" not in res:
+                            res["events_count"] = 0
+                    
+                    print(f"[ECON GEN THREAD] Completed {date_iso}: {res}")
+                except Exception as exc:  # noqa: BLE001
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(f"[ECON GEN THREAD] ERROR for {date_iso}: {exc}\n{tb}")
+                    res = {
+                        "date_iso": date_iso,
+                        "error": str(exc)[:500],  # Truncate long errors
+                        "skipped_rank": False,
+                        "skipped_brief": False,
+                        "events_count": 0
+                    }
+                finally:
+                    # Always append result and update progress, even on error
+                    # Ensure res is a valid dict before appending
+                    if res is None:
+                        res = {
+                            "date_iso": date_iso,
+                            "error": "Result was None",
+                            "skipped_rank": False,
+                            "skipped_brief": False,
+                            "events_count": 0
+                        }
+                    if isinstance(res, dict):
+                        store["results"].append(res)
+                    else:
+                        # Fallback: create a safe dict wrapper
+                        print(f"[ECON GEN THREAD] WARNING: Appending non-dict result, wrapping it")
+                        store["results"].append({
+                            "date_iso": date_iso,
+                            "error": f"Invalid result format: {type(res).__name__}",
+                            "skipped_rank": False,
+                            "skipped_brief": False,
+                            "events_count": 0
+                        })
+                    store["completed"] = i + 1
+                    print(f"[ECON GEN THREAD] Progress: {i+1}/{len(dates)} complete")
+            store["done"] = True
+            print(f"[ECON GEN THREAD] All {len(dates)} dates processed, done=True")
+        except Exception as exc:  # noqa: BLE001
+            # Catastrophic failure - mark all remaining dates as failed
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[ECON GEN THREAD] CATASTROPHIC ERROR: {exc}\n{tb}")
+            # Mark remaining dates as failed
+            completed = store.get("completed", 0)
+            for i in range(completed, len(dates)):
+                store["results"].append({
+                    "date_iso": dates[i] if i < len(dates) else "?",
+                    "error": f"Thread crashed: {str(exc)[:500]}",
+                    "skipped_rank": False,
+                    "skipped_brief": False,
+                    "events_count": 0
+                })
+                store["completed"] = i + 1
+            store["done"] = True
+            store["thread_error"] = str(exc)[:500]
+
+    thread = threading.Thread(target=_run_generation, args=(job_store,), daemon=True)
+    thread.start()
+
+    # Store the job object (serialisable snapshot for the Interval callback)
+    # We pass a lightweight reference via the store; the thread mutates job_store in-place.
+    # To make it accessible across callbacks we stash it in a module-level dict keyed by
+    # the week start date (safe — only one save operation runs at a time in practice).
+    _active_gen_jobs[parsed.week_start_date] = job_store
+
+    initial_progress = html.Div(
+        [
+            html.Span("⚙ ", style={"fontSize": "14px"}),
+            html.Span(
+                f"Generating AI content: 0 of {total_dates} days...",
+                style={"fontStyle": "italic", "color": "#555"},
+            ),
+        ],
+        style={"padding": "8px 10px", "backgroundColor": "#f0f4ff",
+               "borderRadius": "4px", "border": "1px solid #c3d0f0"},
+    )
+
+    # Store a JSON-serialisable snapshot for the interval callback to read
+    job_snapshot = {
+        "week_start": parsed.week_start_date,
+        "total": total_dates,
+    }
+
+    return save_ok_msg, job_snapshot, False, initial_progress
+
+
+# Module-level dict to hold in-flight generation jobs (keyed by week_start date).
+# Populated by save_economic_calendar; consumed by the interval progress callback.
+_active_gen_jobs: dict = {}
+
+# ---------------------------------------------------------------------------
+# Per-date brief generation lock.
+# Prevents two simultaneous requests (e.g. two admin tabs) from calling the
+# LLM and writing the DB twice for the same date.
+#
+# Structure: { date_iso (str) -> threading.Lock }
+# A lock is created on first use and kept for the process lifetime.
+# The lock is acquired before generation starts and released when the DB
+# write (or failure) is complete.  Any second caller that finds the lock
+# held will block until the first write finishes, then read the result
+# that was persisted by the first caller instead of calling the LLM again.
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+_brief_gen_locks: dict = {}
+_brief_gen_locks_meta_lock = _threading.Lock()   # guards _brief_gen_locks itself
+
+
+def _get_brief_lock(date_iso: str) -> _threading.Lock:
+    """Return the per-date Lock, creating it if necessary (thread-safe)."""
+    with _brief_gen_locks_meta_lock:
+        if date_iso not in _brief_gen_locks:
+            _brief_gen_locks[date_iso] = _threading.Lock()
+        return _brief_gen_locks[date_iso]
+
+
+@app.callback(
+    [
+        Output("econ-textarea", "value"),
+        Output("econ-status", "children", allow_duplicate=True),
+        Output("econ-gen-progress", "children", allow_duplicate=True),
+        Output("econ-gen-job-store", "data", allow_duplicate=True),
+        Output("econ-gen-interval", "disabled", allow_duplicate=True),
+    ],
+    Input("econ-clear-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def clear_economic_calendar(n_clicks):
+    """Clear the form and cancel any in-flight generation display."""
+    return "", [], [], None, True
+
+
+# ── AI generation progress polling ────────────────────────────────────────────
+@app.callback(
+    [
+        Output("econ-gen-progress", "children", allow_duplicate=True),
+        Output("econ-gen-interval", "disabled", allow_duplicate=True),
+        Output("econ-gen-job-store", "data", allow_duplicate=True),
+    ],
+    Input("econ-gen-interval", "n_intervals"),
+    State("econ-gen-job-store", "data"),
+    prevent_initial_call=True,
+)
+def poll_generation_progress(n_intervals, job_snapshot):
+    """
+    Poll the in-flight generation job and update the progress area.
+
+    The interval fires every 800 ms while enabled. Once the job is done
+    the interval is disabled and the job store is cleared.
+    """
+    if not job_snapshot:
+        raise PreventUpdate
+
+    week_start = job_snapshot.get("week_start")
+    total = job_snapshot.get("total", 1)
+
+    job = _active_gen_jobs.get(week_start)
+    if job is None:
+        # Job reference lost (e.g. after server restart) — stop polling
+        return [], True, None
+
+    try:
+        completed = job.get("completed", 0)
+        done = job.get("done", False)
+        results = job.get("results", [])
+        
+        # Defensive: ensure results is a list
+        if not isinstance(results, list):
+            print(f"[ECON] WARNING: results is not a list, type={type(results)}, value={results}")
+            results = []
+
+        # Build per-date status lines with defensive dict access
+        status_rows = []
+        for res in results:
+            try:
+                # Ensure res is a dict before calling .get()
+                if not isinstance(res, dict):
+                    print(f"[ECON] WARNING: result item is not a dict, type={type(res)}, value={res}")
+                    date_label = "?"
+                    err = "Invalid result format"
+                    skipped_rank = False
+                    skipped_brief = False
+                    n_events = 0
+                else:
+                    date_label = res.get("date_iso", "?")
+                    err = res.get("error")
+                    skipped_rank = res.get("skipped_rank", False)
+                    skipped_brief = res.get("skipped_brief", False)
+                    n_events = res.get("events_count", 0)
+
+                if err:
+                    icon, detail = "✗", f"error: {err}"
+                    color = "#721c24"
+                elif n_events == 0:
+                    icon, detail = "–", "no events"
+                    color = "#6c757d"
+                else:
+                    rank_tag = "(cached)" if skipped_rank else "(new)"
+                    brief_tag = "(cached)" if skipped_brief else "(new)"
+                    icon, detail = "✓", f"{n_events} events | rank {rank_tag} | brief {brief_tag}"
+                    color = "#155724"
+
+                status_rows.append(
+                    html.Div(
+                        f"{icon} {date_label}: {detail}",
+                        style={"fontSize": "12px", "color": color, "padding": "2px 0"},
+                    )
+                )
+            except Exception as exc:
+                # Skip malformed result items and log the error
+                import traceback
+                print(f"[ECON] ERROR processing result item: {exc}\n{traceback.format_exc()}")
+                status_rows.append(
+                    html.Div(
+                        f"⚠ Error displaying result: {str(exc)[:100]}",
+                        style={"fontSize": "12px", "color": "#721c24", "padding": "2px 0"},
+                    )
+                )
+
+        if done:
+            # All dates processed — stop the interval
+            errors = []
+            for r in results:
+                try:
+                    if isinstance(r, dict) and r.get("error"):
+                        errors.append(r)
+                except Exception:
+                    pass  # Skip malformed items
+            
+            thread_error = job.get("thread_error")
+            summary_color = "#721c24" if (errors or thread_error) else "#155724"
+            summary_bg = "#f8d7da" if (errors or thread_error) else "#d4edda"
+            summary_msg = (
+                f"Generation complete: {completed} of {total} days"
+                + (f" ({len(errors)} errors)" if errors else "")
+                + (f" [Thread error: {thread_error}]" if thread_error else "")
+            )
+            progress_div = html.Div(
+                [
+                    html.Div(
+                        summary_msg,
+                        style={"fontWeight": "bold", "marginBottom": "6px",
+                               "fontSize": "13px", "color": summary_color},
+                    ),
+                    html.Div(status_rows),
+                ],
+                style={"padding": "10px", "backgroundColor": summary_bg,
+                       "borderRadius": "4px", "border": f"1px solid {summary_color}30"},
+            )
+            # Clean up the job reference
+            _active_gen_jobs.pop(week_start, None)
+            return progress_div, True, None
+
+        # Still running — show live progress
+        progress_div = html.Div(
+            [
+                html.Div(
+                    f"⚙ Generating AI content: {completed} of {total} days...",
+                    style={"fontWeight": "bold", "marginBottom": "6px",
+                           "fontSize": "13px", "color": "#004080"},
+                ),
+                html.Div(status_rows),
+            ],
+            style={"padding": "10px", "backgroundColor": "#f0f4ff",
+                   "borderRadius": "4px", "border": "1px solid #c3d0f0"},
+        )
+        return progress_div, False, job_snapshot
+    except Exception as exc:
+        # Catastrophic error in progress polling — log and return safe fallback
+        import traceback
+        print(f"[ECON] CATASTROPHIC ERROR in poll_generation_progress: {exc}\n{traceback.format_exc()}")
+        error_div = html.Div(
+            [
+                html.Div(
+                    f"⚠ Progress display error: {str(exc)[:200]}",
+                    style={"fontWeight": "bold", "marginBottom": "6px",
+                           "fontSize": "13px", "color": "#721c24"},
+                ),
+                html.Div(
+                    "Check server logs for details. Generation may still be running.",
+                    style={"fontSize": "12px", "color": "#666"},
+                ),
+            ],
+            style={"padding": "10px", "backgroundColor": "#f8d7da",
+                   "borderRadius": "4px", "border": "1px solid #721c24"},
+        )
+        # Don't stop polling if job is not done — let it retry
+        done = job.get("done", False)
+        return error_div, done, (None if done else job_snapshot)
+
+
+@app.callback(
+    [
+        Output("econ-weeks-list", "children"),
+        Output("econ-db-health-banner", "children"),
+    ],
+    [
+        Input("main-tabs", "value"),
+        Input({"type": "econ-delete-week", "index": dash.dependencies.ALL}, "n_clicks"),
+    ],
+    prevent_initial_call=False
+)
+def load_recent_weeks(tab_value, delete_clicks_list):
+    """Load recently imported weeks and DB health status when tab is opened."""
+    if tab_value != "econ-calendar" or not ECON_CALENDAR_AVAILABLE:
+        return [], []
+
+    # ── Handle delete button clicks ───────────────────────────────────────
+    if ctx.triggered and isinstance(ctx.triggered_id, dict) and ctx.triggered_id.get("type") == "econ-delete-week":
+        week_id = ctx.triggered_id.get("index")
+        if week_id and delete_week is not None:
+            try:
+                delete_week(DB_PATH, week_id)
+            except Exception as exc:
+                # Continue to reload list even if delete fails
+                print(f"[ECON] Failed to delete week {week_id}: {exc}")
+
+    # ── DB health check ───────────────────────────────────────────────────
+    db_banner = []
+    try:
+        import econ_calendar_db as _ecdb
+        conn = _ecdb.get_connection(DB_PATH)
+        conn.execute("SELECT 1 FROM econ_week LIMIT 1")
+        conn.close()
+        # Healthy – no banner
+    except Exception as exc:
+        db_banner = _econ_db_error_banner(exc)
+        return [html.Div("Cannot display weeks — database unavailable.",
+                         style={"color": "#6c757d", "fontStyle": "italic"})], db_banner
+
+    # ── Load weeks ────────────────────────────────────────────────────────
+    try:
+        from_date = (datetime.date.today() - datetime.timedelta(days=180)).isoformat()
+        to_date = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        weeks = get_weeks_in_range(DB_PATH, from_date, to_date)
+
+        if not weeks:
+            return [html.Div("No weeks imported yet",
+                             style={"color": "#666", "fontStyle": "italic"})], []
+
+        weeks = sorted(weeks, key=lambda w: w["week_start_date"], reverse=True)[:10]
+
+        week_cards = []
+        for week in weeks:
+            week_cards.append(
+                html.Div([
+                    html.Div([
+                        html.Span(
+                            f"{week['week_start_date']} to {week['week_end_date']}",
+                            style={"fontWeight": "bold", "fontSize": "14px"}
+                        ),
+                        html.Span(
+                            f" (imported {week['created_at'][:10]})",
+                            style={"color": "#666", "fontSize": "12px", "marginLeft": "10px"}
+                        ),
+                    ], style={"marginBottom": "8px"}),
+                    html.Div([
+                        html.Button(
+                            "Load for Editing",
+                            id={"type": "econ-load-week", "index": week["id"]},
+                            className="btn btn-sm btn-outline-primary",
+                            n_clicks=0,
+                            style={"marginRight": "8px"}
+                        ),
+                        html.Button(
+                            "Delete",
+                            id={"type": "econ-delete-week", "index": week["id"]},
+                            className="btn btn-sm btn-outline-danger",
+                            n_clicks=0
+                        )
+                    ], style={"display": "flex", "alignItems": "center"})
+                ], style={
+                    "padding": "12px",
+                    "marginBottom": "10px",
+                    "backgroundColor": "#f8f9fa",
+                    "borderRadius": "4px",
+                    "border": "1px solid #dee2e6"
+                })
+            )
+
+        return week_cards, []
+
+    except Exception as exc:
+        return [_econ_db_error_banner(exc)], []
+
+
+@app.callback(
+    Output("econ-textarea", "value", allow_duplicate=True),
+    Input({"type": "econ-load-week", "index": dash.dependencies.ALL}, "n_clicks"),
+    prevent_initial_call=True
+)
+def load_week_for_editing(n_clicks_list):
+    """Load a week's raw text into the textarea."""
+    if not ctx.triggered or not ECON_CALENDAR_AVAILABLE:
+        raise PreventUpdate
+    
+    triggered_id = ctx.triggered_id
+    if not triggered_id or triggered_id.get("type") != "econ-load-week":
+        raise PreventUpdate
+    
+    week_id = triggered_id.get("index")
+    if not week_id:
+        raise PreventUpdate
+    
+    try:
+        raw_text = get_week_raw_text(DB_PATH, week_id)
+        return raw_text if raw_text else ""
+    except Exception:
+        raise PreventUpdate
+
+
+############################
+# 9) DAILY VIEW CALLBACKS
+############################
+
+@app.callback(
+    Output("daily-view-date-input", "value"),
+    [
+        Input("daily-view-date-prev", "n_clicks"),
+        Input("daily-view-date-next", "n_clicks")
+    ],
+    State("daily-view-date-input", "value"),
+    prevent_initial_call=True
+)
+def navigate_daily_date(prev_clicks, next_clicks, current_date):
+    """
+    Handle date navigation arrows (previous/next day).
+    Uses proper date arithmetic to handle month/year boundaries.
+    """
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise dash.exceptions.PreventUpdate
+    
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    # Parse current date (default to yesterday if invalid)
+    try:
+        if current_date and current_date.strip():
+            date_obj = datetime.datetime.strptime(current_date.strip(), "%Y-%m-%d").date()
+        else:
+            date_obj = datetime.date.today() - datetime.timedelta(days=1)
+    except (ValueError, TypeError):
+        date_obj = datetime.date.today() - datetime.timedelta(days=1)
+    
+    # Navigate based on which arrow was clicked
+    if trigger_id == "daily-view-date-prev":
+        date_obj -= datetime.timedelta(days=1)
+    elif trigger_id == "daily-view-date-next":
+        date_obj += datetime.timedelta(days=1)
+    
+    return date_obj.isoformat()
+
 
 @app.callback(
     [
@@ -3015,9 +4471,20 @@ def populate_daily_view_sidebar(login_status, active_tab, n_clicks, date_input):
     # Debug counter
     debug_count = 0
     
+    # Frequency mapping for display
+    frequency_map = {
+        'w': 'Weekly',
+        'd': 'Daily',
+        'm': 'Monthly',
+        'q': 'Quarterly',
+        'y': 'Yearly',
+        'u': 'Unknown'
+    }
+    
     for art in artifacts:
-        # Extract products from sum.json if available
+        # Extract products and warnings from sum.json if available
         products_display = ""
+        has_warnings = False
         if art["has_sum_json"]:
             try:
                 with open(art["sum_json_path"], "r", encoding="utf-8") as fh:
@@ -3025,58 +4492,76 @@ def populate_daily_view_sidebar(login_status, active_tab, n_clicks, date_input):
                     products = sum_data.get("meta", {}).get("products", [])
                     if products:
                         products_display = ", ".join(products) if isinstance(products, list) else str(products)
+                    warnings = sum_data.get("sections", {}).get("warnings", []) or []
+                    has_warnings = bool(warnings) and (isinstance(warnings, list) and len(warnings) > 0)
             except Exception:
                 pass  # leave blank if can't access
 
-        # Extract firm from title prefix (art["provider"] is often "O" for Others)
-        # Title format: "GM_Commodity Analyst_20260211_u"
-        # Extract "GM" before first underscore, look up "GM_" in PREFIX_MAP
-        title_raw = art["title"]
-        firm_extracted = None
-        firm_name = art["provider"]  # fallback
-        title_working = title_raw
+        # Get firm name and clean title using shared resolver
+        firm_name = art["provider"]
         
-        if "_" in title_raw:
-            # Split on first underscore
-            parts = title_raw.split("_", 1)
-            potential_code = parts[0]
-            
-            # Try to look up in PREFIX_MAP
-            firm_key = f"{potential_code}_"
-            if firm_key in PREFIX_MAP:
-                firm_extracted = potential_code
-                firm_name = PREFIX_MAP[firm_key]
-                # Remove firm prefix from title
-                title_working = parts[1] if len(parts) > 1 else title_raw
+        # Use shared resolve_display_title for consistency across all views
+        title_cleaned = resolve_display_title(art["artifact_folder"], meta_title=art.get("title"))
         
-        # Clean title - remove trailing date/frequency tokens
-        # Remove _YYYYMMDD (8-digit dates), _u/_w/_d/_m, and frequency words
-        title_cleaned = re.sub(r'_\d{8}', '', title_working)  # Remove _20260211
-        title_cleaned = re.sub(r'[_\-]?(u|w|d|m|q)$', '', title_cleaned)  # Remove trailing _u, _w, _d, _m, _q
-        title_cleaned = re.sub(r'\s*[_\-]?\s*(daily|weekly|monthly)\s*$', '', title_cleaned, flags=re.IGNORECASE)
-        title_cleaned = title_cleaned.strip("_").strip()
+        # Get frequency display
+        frequency_code = art.get("frequency_code", "u")
+        frequency_display = frequency_map.get(frequency_code, "Unknown")
 
         # Debug first 3 articles
         if debug_count < 3:
             print(f"\n[DAILY VIEW DEBUG] Article {debug_count + 1}:")
-            print(f"  title_raw: {title_raw}")
-            print(f"  firm_extracted (from title): {firm_extracted}")
-            print(f"  firm_name (after PREFIX_MAP): {firm_name}")
+            print(f"  artifact_folder: {art['artifact_folder']}")
+            print(f"  firm_name: {firm_name}")
             print(f"  title_cleaned: {title_cleaned}")
+            print(f"  frequency: {frequency_display} ({frequency_code})")
             print(f"  products: {products_display}")
             debug_count += 1
 
         sidebar_buttons.append(
             html.Button(
                 [
-                    # Line 1: Firm name
+                    # Line 1: Firm name (blue badge) + Frequency (green badge) + warning indicator if present
                     html.Div(
-                        firm_name,
+                        [
+                            html.Span(
+                                firm_name,
+                                style={
+                                    "display": "inline-block",
+                                    "fontSize": "11px",
+                                    "color": "#004080",
+                                    "fontWeight": "bold",
+                                    "backgroundColor": "#e3f2fd",
+                                    "padding": "2px 8px",
+                                    "borderRadius": "8px",
+                                    "marginRight": "8px"
+                                }
+                            ),
+                            html.Span(
+                                frequency_display,
+                                style={
+                                    "display": "inline-block",
+                                    "fontSize": "11px",
+                                    "color": "white",
+                                    "fontWeight": "500",
+                                    "backgroundColor": "#28a745",
+                                    "padding": "2px 8px",
+                                    "borderRadius": "8px",
+                                    "marginRight": "8px" if has_warnings else None
+                                }
+                            ),
+                            html.Span(
+                                "⚠️",
+                                style={
+                                    "display": "inline-block",
+                                    "fontSize": "14px",
+                                    "lineHeight": "1"
+                                }
+                            ) if has_warnings else html.Span()
+                        ],
                         style={
-                            "fontSize": "11px",
-                            "color": "#666",
-                            "fontWeight": "bold",
-                            "marginBottom": "4px"
+                            "marginBottom": "4px",
+                            "display": "flex",
+                            "alignItems": "center"
                         }
                     ),
                     # Line 2: Article title
@@ -3094,12 +4579,17 @@ def populate_daily_view_sidebar(login_status, active_tab, n_clicks, date_input):
                             "WebkitBoxOrient": "vertical"
                         }
                     ),
-                    # Line 3: Products (if available)
+                    # Line 3: Products (turquoise pill, same as article view on the right)
                     html.Div(
                         products_display,
                         style={
+                            "display": "inline-block",
                             "fontSize": "11px",
-                            "color": "#999",
+                            "color": "white",
+                            "fontWeight": "500",
+                            "backgroundColor": "#17a2b8",
+                            "padding": "2px 8px",
+                            "borderRadius": "8px",
                             "lineHeight": "1.2",
                             "overflow": "hidden",
                             "textOverflow": "ellipsis",
@@ -3130,16 +4620,1248 @@ def populate_daily_view_sidebar(login_status, active_tab, n_clicks, date_input):
     return artifacts, sidebar_buttons
 
 
+def _render_web_bullet(item: dict, base_style: dict = None) -> list:
+    """Build Dash components for a bullet with optional [EQUITY] badge and ai_context.
+
+    Args:
+        item: Bullet dict with text, ai_context (optional), sources.
+        base_style: Override style for the Li element.
+
+    Returns:
+        List of Dash components (Li + optional P for ai_context).
+    """
+    import re as _re
+    text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+    ai_context = item.get("ai_context", "") if isinstance(item, dict) else ""
+    li_style = base_style or {"marginBottom": "6px", "lineHeight": "1.4", "fontSize": "14px"}
+
+    parts: list = []
+
+    eq_match = _re.match(r"\[EQUITY:\s*([A-Z.]+)\]\s*", text)
+    if eq_match:
+        ticker = eq_match.group(1)
+        text = text[eq_match.end():]
+        parts.append(html.Span(
+            f"EQUITY: {ticker}",
+            style={
+                "display": "inline-block",
+                "padding": "1px 6px",
+                "borderRadius": "3px",
+                "fontSize": "10px",
+                "fontWeight": "600",
+                "backgroundColor": "#E8DAEF",
+                "color": "#6C3483",
+                "marginRight": "6px",
+                "verticalAlign": "middle",
+            }
+        ))
+
+    parts.append(html.Span(text))
+    elements = [html.Li(parts, style=li_style)]
+
+    if ai_context:
+        elements.append(html.P(
+            ai_context,
+            style={
+                "fontSize": "13px",
+                "fontStyle": "italic",
+                "color": "#5A6A7A",
+                "marginLeft": "12px",
+                "marginTop": "2px",
+                "marginBottom": "8px",
+                "lineHeight": "1.4",
+            }
+        ))
+
+    return elements
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY RECAP LAYOUT HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Inline tag colours per asset class
+_TAG_COLORS: dict = {
+    "EQUITIES":    {"bg": "#E8DAEF", "fg": "#6C3483"},
+    "RATES":       {"bg": "#D6EAF8", "fg": "#1A5276"},
+    "COMMODITIES": {"bg": "#FDEBD0", "fg": "#784212"},
+    "FX":          {"bg": "#D5F5E3", "fg": "#1E8449"},
+    "VOLATILITY":  {"bg": "#FDEDEC", "fg": "#922B21"},
+    "CRYPTO":      {"bg": "#EBF5FB", "fg": "#1F618D"},
+    "CREDIT":      {"bg": "#F9EBEA", "fg": "#78281F"},
+    "GENERAL":     {"bg": "#F2F3F4", "fg": "#566573"},
+}
+
+_COUNTRY_FLAGS: dict = {
+    "US": "🇺🇸", "USA": "🇺🇸", "United States": "🇺🇸",
+    "EU": "🇪🇺", "Euro Area": "🇪🇺", "Eurozone": "🇪🇺",
+    "UK": "🇬🇧", "United Kingdom": "🇬🇧",
+    "JP": "🇯🇵", "Japan": "🇯🇵",
+    "CN": "🇨🇳", "China": "🇨🇳",
+    "DE": "🇩🇪", "Germany": "🇩🇪",
+    "FR": "🇫🇷", "France": "🇫🇷",
+    "CA": "🇨🇦", "Canada": "🇨🇦",
+    "AU": "🇦🇺", "Australia": "🇦🇺",
+    "NZ": "🇳🇿", "New Zealand": "🇳🇿",
+    "CH": "🇨🇭", "Switzerland": "🇨🇭",
+    "SE": "🇸🇪", "Sweden": "🇸🇪",
+    "NO": "🇳🇴", "Norway": "🇳🇴",
+    "DK": "🇩🇰", "Denmark": "🇩🇰",
+    "NL": "🇳🇱", "Netherlands": "🇳🇱",
+    "IT": "🇮🇹", "Italy": "🇮🇹",
+    "ES": "🇪🇸", "Spain": "🇪🇸",
+    "KR": "🇰🇷", "South Korea": "🇰🇷",
+    "SG": "🇸🇬", "Singapore": "🇸🇬",
+    "HK": "🇭🇰", "Hong Kong": "🇭🇰",
+    "IN": "🇮🇳", "India": "🇮🇳",
+    "BR": "🇧🇷", "Brazil": "🇧🇷",
+    "MX": "🇲🇽", "Mexico": "🇲🇽",
+}
+
+_CARD_BODY_STYLE = {
+    "padding": "14px 16px 10px 16px",
+    "borderTop": "1px solid #e9ecef",
+}
+
+_CARD_STYLE = {
+    "border": "1px solid #dee2e6",
+    "borderRadius": "6px",
+    "marginBottom": "14px",
+    "backgroundColor": "#fff",
+    "boxShadow": "0 1px 3px rgba(0,0,0,.06)",
+    "overflow": "hidden",
+}
+
+_CARD_HEADER_STYLE = {
+    "display": "flex",
+    "justifyContent": "space-between",
+    "alignItems": "center",
+    "padding": "10px 14px",
+    "cursor": "pointer",
+    "userSelect": "none",
+    "backgroundColor": "#f8f9fa",
+}
+
+
+def _inline_tag(label: str) -> html.Span:
+    """Render a small coloured [LABEL] tag inline."""
+    colors = _TAG_COLORS.get(label.upper(), _TAG_COLORS["GENERAL"])
+    return html.Span(
+        f"[{label}]",
+        style={
+            "display": "inline-block",
+            "padding": "1px 5px",
+            "borderRadius": "3px",
+            "fontSize": "10px",
+            "fontWeight": "700",
+            "backgroundColor": colors["bg"],
+            "color": colors["fg"],
+            "marginRight": "6px",
+            "verticalAlign": "middle",
+            "letterSpacing": "0.03em",
+        }
+    )
+
+
+def _chip(text: str, color: str = "#e9ecef", text_color: str = "#343a40") -> html.Span:
+    """Render a small pill/chip."""
+    return html.Span(
+        text,
+        style={
+            "display": "inline-block",
+            "padding": "2px 9px",
+            "borderRadius": "12px",
+            "fontSize": "12px",
+            "fontWeight": "500",
+            "backgroundColor": color,
+            "color": text_color,
+            "marginRight": "6px",
+            "marginBottom": "4px",
+            "whiteSpace": "nowrap",
+        }
+    )
+
+
+def _build_card(
+    card_id: str,
+    title: str,
+    body_children: list,
+    default_collapsed: bool = True,
+    title_icon: str = "",
+) -> html.Div:
+    """
+    Collapsible card.  Collapse state is toggled via a clientside callback
+    registered once at module level (see _register_card_callbacks).
+    The card body div has id ``card_id + '-body'``.
+    The toggle button has id ``card_id + '-toggle'``.
+    """
+    chevron_id = f"{card_id}-chevron"
+    body_id = f"{card_id}-body"
+    toggle_id = f"{card_id}-toggle"
+
+    initial_body_style = dict(_CARD_BODY_STYLE)
+    initial_chevron = "▲" if not default_collapsed else "▼"
+    if default_collapsed:
+        initial_body_style["display"] = "none"
+
+    header = html.Div(
+        [
+            html.Span(
+                f"{title_icon} {title}".strip(),
+                style={"fontWeight": "600", "fontSize": "14px", "color": "#212529"},
+            ),
+            html.Span(
+                initial_chevron,
+                id=chevron_id,
+                style={"fontSize": "11px", "color": "#6c757d"},
+            ),
+        ],
+        id=toggle_id,
+        style=_CARD_HEADER_STYLE,
+        n_clicks=0,
+    )
+    body = html.Div(
+        body_children,
+        id=body_id,
+        style=initial_body_style,
+    )
+    return html.Div([header, body], style=_CARD_STYLE)
+
+
+def _build_tagged_bullet_list(
+    grouped: dict,
+    card_id: str,
+    preview_per_group: int = 3,
+) -> list:
+    """
+    Render a flat list where each bullet is prefixed with a [TAG] label.
+    Each asset-class group shows ``preview_per_group`` items by default,
+    with a 'Show all N' link to reveal the rest.
+
+    Args:
+        grouped: Dict mapping asset-class label → list of bullet dicts.
+        card_id: Unique prefix for generated IDs (must be stable across renders).
+        preview_per_group: How many bullets to show before the Show-all link.
+
+    Returns:
+        List of Dash components to place inside a card body.
+    """
+    children: list = []
+    for group_label, items in grouped.items():
+        if not items:
+            continue
+        visible = items[:preview_per_group]
+        hidden = items[preview_per_group:]
+        group_slug = group_label.lower().replace(" ", "_")
+        overflow_id = f"{card_id}-{group_slug}-overflow"
+        showall_id = f"{card_id}-{group_slug}-showall"
+
+        rows: list = []
+        for item in visible:
+            text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+            rows.append(html.Div(
+                [_inline_tag(group_label), html.Span(text, style={"fontSize": "13px", "lineHeight": "1.45"})],
+                style={"marginBottom": "6px"},
+            ))
+
+        hidden_rows: list = []
+        for item in hidden:
+            text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+            hidden_rows.append(html.Div(
+                [_inline_tag(group_label), html.Span(text, style={"fontSize": "13px", "lineHeight": "1.45"})],
+                style={"marginBottom": "6px"},
+            ))
+
+        children.extend(rows)
+
+        if hidden_rows:
+            children.append(html.Div(
+                hidden_rows,
+                id=overflow_id,
+                style={"display": "none"},
+            ))
+            children.append(html.Div(
+                html.A(
+                    f"Show all {len(items)} →",
+                    id=showall_id,
+                    href="#",
+                    style={"fontSize": "12px", "color": "#007bff", "textDecoration": "none"},
+                    n_clicks=0,
+                ),
+                style={"marginBottom": "10px"},
+            ))
+
+    return children
+
+
+def _build_risk_flags_card(warnings: list, card_id: str = "risk-flags") -> html.Div:
+    """
+    Compact Risk Flags card: one chip per warning, tapping expands full text inline.
+    A 'Show all' link below reveals remaining chips when > 5 warnings.
+    """
+    if not warnings:
+        return html.Div()
+
+    PREVIEW_COUNT = 5
+    chip_items: list = []
+
+    for i, w in enumerate(warnings):
+        text = w.get("text", str(w)) if isinstance(w, dict) else str(w)
+        # Derive a short chip label: first ~40 chars or up to first comma/period
+        short = text.split(".")[0].split(",")[0].strip()
+        if len(short) > 42:
+            short = short[:40] + "…"
+
+        chip_detail_id = f"{card_id}-chip-detail-{i}"
+        chip_toggle_id = f"{card_id}-chip-toggle-{i}"
+
+        chip_items.append(html.Div(
+            [
+                # The chip itself acts as toggle
+                html.Span(
+                    short,
+                    id=chip_toggle_id,
+                    n_clicks=0,
+                    style={
+                        "display": "inline-block",
+                        "padding": "3px 10px",
+                        "borderRadius": "12px",
+                        "fontSize": "12px",
+                        "fontWeight": "500",
+                        "backgroundColor": "#fff3cd",
+                        "color": "#856404",
+                        "border": "1px solid #ffc107",
+                        "cursor": "pointer",
+                        "marginRight": "6px",
+                        "marginBottom": "4px",
+                    }
+                ),
+                # Expanded detail (hidden by default)
+                html.Div(
+                    text,
+                    id=chip_detail_id,
+                    style={
+                        "display": "none",
+                        "fontSize": "13px",
+                        "color": "#495057",
+                        "backgroundColor": "#fffbea",
+                        "border": "1px solid #ffc107",
+                        "borderRadius": "4px",
+                        "padding": "6px 10px",
+                        "marginTop": "4px",
+                        "marginBottom": "6px",
+                        "lineHeight": "1.45",
+                    }
+                ),
+            ],
+            style={"display": "inline-block", "verticalAlign": "top", "marginBottom": "2px"}
+            if i < PREVIEW_COUNT else {"display": "none"},
+            id=f"{card_id}-chip-wrapper-{i}",
+        ))
+
+    overflow_id = f"{card_id}-overflow"
+    showall_id = f"{card_id}-showall"
+
+    body_children: list = [
+        html.Div(chip_items, style={"marginBottom": "6px"}),
+    ]
+
+    if len(warnings) > PREVIEW_COUNT:
+        # Hidden overflow wrappers (indices >= PREVIEW_COUNT) — already hidden above;
+        # the Show-all link reveals them by toggling their parent wrappers.
+        body_children.append(html.Div(
+            html.A(
+                f"Show all {len(warnings)} risk flags →",
+                id=showall_id,
+                href="#",
+                style={"fontSize": "12px", "color": "#856404", "textDecoration": "none"},
+                n_clicks=0,
+            ),
+            style={"marginTop": "4px"},
+        ))
+
+    return _build_card(
+        card_id=card_id,
+        title="Risk Flags",
+        body_children=body_children,
+        default_collapsed=True,
+        title_icon="⚠️",
+    )
+
+
+def _build_briefing_strip(sections: dict, meta: dict) -> html.Div:
+    """
+    Single horizontal strip shown at the very top of the Daily Recap page.
+    Sticky on desktop (position:sticky), inline on mobile.
+
+    Segments rendered (only when data exists):
+      • Volatility tone  – derived from volatility_by_asset_class
+      • Top catalysts    – from consensus_catalysts (first 2)
+      • Liquidity/holidays – from econ events (all_day=True items)
+      • Risk themes      – from warnings (first 3 unique topic words)
+    """
+    chips: list = []
+
+    # ── Volatility tone ───────────────────────────────────────────────────
+    vol_by_ac = sections.get("volatility_by_asset_class", {})
+    if vol_by_ac:
+        # Aggregate: find the most common expected_volatility
+        from collections import Counter as _Counter
+        vol_labels = [v.get("expected_volatility", "") for v in vol_by_ac.values() if v.get("expected_volatility")]
+        skew_labels = [v.get("directional_skew", "") for v in vol_by_ac.values() if v.get("directional_skew")]
+        if vol_labels:
+            top_vol = _Counter(vol_labels).most_common(1)[0][0]
+            top_skew = _Counter(skew_labels).most_common(1)[0][0] if skew_labels else ""
+            vol_text = f"{top_vol} · {top_skew}" if top_skew else top_vol
+            vol_color = (
+                "#dc3545" if top_vol == "High" else
+                "#fd7e14" if top_vol == "Medium" else
+                "#28a745"
+            )
+            chips.append(_chip(f"📊 {vol_text}", color=vol_color + "22", text_color=vol_color))
+
+    # ── Top catalysts ─────────────────────────────────────────────────────
+    catalysts = sections.get("consensus_catalysts", [])
+    if catalysts:
+        cat_texts = []
+        for c in catalysts[:2]:
+            t = c.get("text", str(c)) if isinstance(c, dict) else str(c)
+            # Shorten: first clause before comma/semicolon
+            short = t.split(",")[0].split(";")[0].strip()
+            if len(short) > 50:
+                short = short[:48] + "…"
+            cat_texts.append(short)
+        if cat_texts:
+            chips.append(_chip("📌 " + " · ".join(cat_texts), color="#e8f4f8", text_color="#0c5460"))
+
+    # ── Primary risk themes (from warnings) ───────────────────────────────
+    warnings = sections.get("warnings", [])
+    if warnings:
+        # Extract bracketed tags like [Political] or leading topic words
+        import re as _re2
+        theme_words: list = []
+        for w in warnings[:6]:
+            t = w.get("text", str(w)) if isinstance(w, dict) else str(w)
+            m = _re2.search(r"\[([A-Za-z][A-Za-z ]{1,20})\]", t)
+            if m:
+                word = m.group(1).strip()
+            else:
+                # Fallback: first capitalised word that isn't a stop-word
+                words = t.split()
+                word = next(
+                    (wd.rstrip(".,;:") for wd in words
+                     if wd[0:1].isupper() and len(wd) > 3
+                     and wd.lower() not in {"the", "this", "that", "with", "from", "amid"}),
+                    ""
+                )
+            if word and word not in theme_words:
+                theme_words.append(word)
+            if len(theme_words) >= 3:
+                break
+        if theme_words:
+            chips.append(_chip("🚩 " + " · ".join(theme_words), color="#fdf3f3", text_color="#842029"))
+
+    if not chips:
+        return html.Div()
+
+    return html.Div(
+        html.Div(
+            chips,
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "6px",
+                "alignItems": "center",
+                "padding": "8px 16px",
+            }
+        ),
+        style={
+            "backgroundColor": "#f8f9fa",
+            "borderBottom": "1px solid #dee2e6",
+            "position": "sticky",
+            "top": "0",
+            "zIndex": "100",
+            # Mobile: override sticky via media-query class (see inline style note)
+        },
+        className="daily-briefing-strip",
+    )
+
+
+def _build_econ_events_structured(events: list) -> html.Div:
+    """
+    Structured event rows: flag · name · [CCY] · [Holiday|Event] badge.
+    Replaces the old monospace text list.
+    """
+    rows: list = []
+    for evt in events:
+        country = evt.get("country_or_region", "")
+        title = evt.get("title", "")
+        currency = evt.get("currency_tag", "")
+        is_all_day = bool(evt.get("all_day"))
+        time_label = evt.get("time_local", "")
+
+        flag = _COUNTRY_FLAGS.get(country, country[:2].upper() if country else "")
+
+        badge_text = "Holiday" if is_all_day else "Event"
+        badge_color = "#d1ecf1" if is_all_day else "#e2e3e5"
+        badge_fg = "#0c5460" if is_all_day else "#383d41"
+
+        time_span = html.Span(
+            "All day" if is_all_day else (time_label or ""),
+            style={
+                "display": "inline-block",
+                "minWidth": "52px",
+                "fontSize": "11px",
+                "color": "#28a745" if is_all_day else "#007bff",
+                "fontWeight": "600",
+                "marginRight": "6px",
+            }
+        )
+        flag_span = html.Span(
+            flag,
+            style={"marginRight": "5px", "fontSize": "14px"}
+        ) if flag else None
+        name_span = html.Span(title, style={"fontSize": "13px", "marginRight": "6px"})
+        ccy_span = html.Span(
+            currency,
+            style={
+                "display": "inline-block",
+                "padding": "1px 5px",
+                "borderRadius": "3px",
+                "fontSize": "10px",
+                "fontWeight": "600",
+                "backgroundColor": "#e9ecef",
+                "color": "#495057",
+                "marginRight": "5px",
+            }
+        ) if currency else None
+        badge_span = html.Span(
+            badge_text,
+            style={
+                "display": "inline-block",
+                "padding": "1px 6px",
+                "borderRadius": "3px",
+                "fontSize": "10px",
+                "fontWeight": "600",
+                "backgroundColor": badge_color,
+                "color": badge_fg,
+            }
+        )
+
+        row_children = [time_span]
+        if flag_span:
+            row_children.append(flag_span)
+        row_children.append(name_span)
+        if ccy_span:
+            row_children.append(ccy_span)
+        row_children.append(badge_span)
+
+        rows.append(html.Div(row_children, style={"marginBottom": "6px", "display": "flex", "alignItems": "center", "flexWrap": "wrap"}))
+
+    return html.Div(rows)
+
+
+def _econ_db_error_banner(error: Exception) -> html.Div:
+    """
+    Return a descriptive, styled error banner for SQLite failures.
+
+    Args:
+        error: The exception raised when accessing the database.
+
+    Returns:
+        Dash Div error component.
+    """
+    msg = str(error)
+    if "locked" in msg.lower():
+        detail = "The database is locked by another process. Close any other connections and retry."
+    elif "no such table" in msg.lower():
+        detail = "Schema is missing. The database file may be corrupt or incomplete."
+    elif "unable to open" in msg.lower() or "no such file" in msg.lower():
+        detail = f"Database file not found at: {DB_PATH}"
+    else:
+        detail = msg
+
+    return html.Div(
+        [
+            html.Strong("⚠️ Economic Calendar database error: "),
+            html.Span(detail),
+            html.Br(),
+            html.Span(
+                f"Expected location: {DB_PATH}",
+                style={"fontSize": "11px", "color": "#856404"},
+            ),
+        ],
+        style={
+            "padding": "10px 14px",
+            "backgroundColor": "#fff3cd",
+            "border": "1px solid #ffc107",
+            "borderRadius": "4px",
+            "color": "#856404",
+            "marginBottom": "12px",
+        },
+    )
+
+
+def _render_econ_events_panel(date_str: str, rollup_json: Optional[dict], dynamics_mode: bool = True, is_logged_in: bool = False):
+    """
+    Build the Economic Events panel for one rollup date.
+
+    Returns a collapsible card (html.Div) or None when no events exist.
+
+    Args:
+        date_str: Date in YYYYMMDD or YYYY-MM-DD format.
+        rollup_json: Parsed rollup dict (unused here, kept for API compat).
+        dynamics_mode: Whether to render the dynamics brief section.
+        is_logged_in: Whether the current viewer is authenticated.
+                      Forwarded to _render_econ_daily_brief to control
+                      "Generate Brief" button visibility.
+
+    Returns:
+        html.Div card, or None.
+    """
+    if not ECON_CALENDAR_AVAILABLE:
+        return None
+
+    # ── Normalise date_str to YYYY-MM-DD ──────────────────────────────────
+    try:
+        if date_str and len(date_str) == 8 and date_str.isdigit():
+            date_iso = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        else:
+            date_iso = (date_str or "").strip()
+        datetime.datetime.strptime(date_iso, "%Y-%m-%d")
+        print(f"[ECON] Panel called for date_iso: {date_iso}")
+    except (ValueError, AttributeError) as e:
+        print(f"[ECON] Failed to parse date_str='{date_str}': {e}")
+        return None
+
+    # ── Query events ──────────────────────────────────────────────────────
+    try:
+        events = get_events_for_date(DB_PATH, date_iso)
+        print(f"[ECON] Daily View events loaded: {len(events)} events for {date_iso}")
+    except Exception as exc:
+        print(f"[ECON] get_events_for_date failed for {date_iso}: {exc}")
+        return _build_card(
+            card_id="econ-events-error",
+            title="Economic Events",
+            body_children=[_econ_db_error_banner(exc)],
+            default_collapsed=True,
+            title_icon="📅",
+        )
+
+    if not events:
+        print(f"[ECON] No events found for {date_iso}, panel hidden")
+        return None
+
+    # ── Build structured event rows ────────────────────────────────────────
+    event_rows = _build_econ_events_structured(events)
+
+    # ── Pre-generated brief ────────────────────────────────────────────────
+    # is_logged_in is threaded from the Dash callback via the login-user store.
+    # Regular visitors (is_logged_in=False) never see the Generate Brief button,
+    # so a page load by N anonymous users never triggers N AI calls.
+    brief_div = _render_econ_daily_brief(date_iso, dynamics_mode, is_logged_in=is_logged_in)
+
+    body_children: list = [
+        html.Div(
+            html.Span(
+                "Educational only. Not financial advice. · Events live from SQLite",
+                style={"fontSize": "11px", "color": "#999", "fontStyle": "italic"},
+            ),
+            style={"marginBottom": "10px"},
+        ),
+        html.Div(
+            event_rows,
+            style={
+                "backgroundColor": "#f8f9fa",
+                "padding": "10px 14px",
+                "borderRadius": "4px",
+                "marginBottom": "10px",
+            },
+        ),
+    ]
+    if brief_div is not None:
+        body_children.append(brief_div)
+
+    return _build_card(
+        card_id="econ-events",
+        title=f"Economic Events  ({len(events)})",
+        body_children=body_children,
+        default_collapsed=True,
+        title_icon="📅",
+    )
+
+
+def _render_econ_daily_brief(date_iso: str, dynamics_mode: bool, is_logged_in: bool = False) -> html.Div:
+    """
+    Render the pre-generated Economic Brief section for one date.
+
+    Reads only from the database — never calls the LLM or any AI function.
+
+    Rules:
+    - If no events exist for the date, return None (section hidden).
+    - If no brief row or theory_text is empty:
+        * Show a one-line "Summary pending" status (hidden to regular users).
+        * If is_logged_in is True, also render a "Generate Brief" button that
+          calls POST /api/econ/generate-brief via a clientside fetch callback.
+          The button is NEVER shown to unauthenticated visitors, so a page
+          load by N regular users never triggers N AI calls.
+    - If dynamics_mode is True and dynamics_text is populated, render it below theory.
+
+    Args:
+        date_iso: ISO date YYYY-MM-DD.
+        dynamics_mode: Whether to render the dynamics section.
+        is_logged_in: Whether the current viewer is authenticated.
+                      Controls "Generate Brief" button visibility.
+
+    Returns:
+        html.Div with the brief section, or None if no events exist.
+    """
+    if not ECON_CALENDAR_AVAILABLE:
+        return None
+
+    # Guard: only show section when events exist for this date
+    try:
+        events = get_events_for_date(DB_PATH, date_iso)
+    except Exception:
+        events = []
+
+    if not events:
+        return None
+
+    # Query the pre-generated brief (read-only, no LLM)
+    brief_row = None
+    try:
+        if get_daily_brief is not None:
+            brief_row = get_daily_brief(DB_PATH, date_iso)
+            print(f"[ECON READ] get_daily_brief for date_key={date_iso}: found={brief_row is not None}")
+    except Exception as e:
+        print(f"[ECON READ] get_daily_brief FAILED for date_key={date_iso}: {e}")
+        brief_row = None
+
+    theory_text = (brief_row or {}).get("theory_text", "").strip() if brief_row else ""
+    dynamics_text = (brief_row or {}).get("dynamics_text", "").strip() if brief_row else ""
+
+    # Log what we found
+    if brief_row:
+        print(f"[ECON READ] Brief for date_key={date_iso}: theory_len={len(theory_text)}, dynamics_len={len(dynamics_text)}")
+
+    # Detect error messages stored as theory_text (legacy bug - error messages were saved as content)
+    # Error messages typically start with "Brief generation unavailable:" or similar
+    _ERROR_PREFIXES = (
+        "brief generation unavailable",
+        "summary unavailable",
+        "summary generation failed",
+        "error code:",
+    )
+    brief_is_error = theory_text and any(theory_text.lower().startswith(p) for p in _ERROR_PREFIXES)
+
+    if brief_is_error:
+        print(f"[ECON READ] Detected error message in brief for date_key={date_iso}, treating as missing")
+        theory_text = ""  # Treat as missing
+        dynamics_text = ""
+
+    # ── Brief is missing or invalid ───────────────────────────────────────
+    # Regular users see nothing (section stays hidden).
+    # Logged-in users see a one-line status + a "Generate Brief" button.
+    # The button triggers a clientside fetch to /api/econ/generate-brief;
+    # the result is rendered inline without a page reload.
+    if not theory_text:
+        status_children: list = [
+            html.P(
+                f"Summary pending for {date_iso}",
+                style={
+                    "fontSize": "12px",
+                    "color": "#6c757d",
+                    "fontStyle": "italic",
+                    "marginTop": "16px",
+                    "marginBottom": "8px",
+                },
+            ),
+        ]
+
+        if is_logged_in:
+            # The button id carries the date so the clientside callback knows
+            # which date to request.  The econ-gen-brief-status div receives
+            # the inline brief (or error) from render_generated_brief().
+            status_children.append(
+                html.Button(
+                    "Generate Brief",
+                    id={"type": "econ-gen-brief-btn", "date": date_iso},
+                    className="btn btn-sm btn-outline-primary",
+                    style={"fontSize": "11px", "padding": "4px 12px"},
+                )
+            )
+
+        # econ-brief-status is the target for render_generated_brief() output
+        return html.Div(
+            status_children,
+            id={"type": "econ-brief-status", "date": date_iso},
+        )
+
+    # Valid brief found - render the Summary section
+    section_children = [
+        html.Hr(style={"margin": "24px 0", "border": "none", "borderTop": "1px solid #e0e7ef"}),
+        html.H3(
+            "Summary:",
+            style={"fontSize": "17px", "color": "#004080", "marginBottom": "10px"},
+        ),
+    ]
+
+    # Single summary block (was "Theory")
+    theory_lines = [
+        html.P(line, style={"margin": "2px 0", "fontSize": "13px", "lineHeight": "1.55"})
+        for line in theory_text.splitlines()
+        if line.strip()
+    ]
+    section_children.append(
+        html.Div(
+            theory_lines,
+            style={
+                "backgroundColor": "#f8f9fa", "padding": "12px 16px",
+                "borderRadius": "4px", "marginBottom": "10px",
+                "borderLeft": "4px solid #004080",
+            },
+        )
+    )
+
+    return html.Div(section_children, style={"marginTop": "6px"})
+
+
+def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: bool = True, is_logged_in: bool = False) -> html.Div:
+    """
+    Render the Daily Recap page in a professional, trading-audience layout.
+
+    Section order (matches spec):
+      1. Briefing Strip  (sticky desktop / inline mobile)
+      2. Today in 3 Bullets  (TLDR — default expanded)
+      3. Catalysts & Calendar  (consensus_catalysts + econ events — default expanded)
+      4. Volatility Outlook  (default collapsed)
+      5. Risk Flags  (warnings chips — default collapsed)
+      6. Yesterday  (observations — default collapsed)
+      7. Forward Watch  (forward_watch — default collapsed)
+      8. Articles list  (trade ideas / sources — default collapsed)
+
+    Desktop ≥ xl: two-column grid.
+    All cards are collapsible with localStorage persistence.
+    """
+    meta = rollup_json.get("meta", {})
+    sections = rollup_json.get("sections", {})
+    ui = rollup_json.get("ui", {})
+
+    title = ui.get("title", "Preparation for Today")
+    providers = meta.get("providers", [])
+    date_str = meta.get("date", "")
+
+    # Normalise date_str → YYYY-MM-DD
+    if date_str and len(date_str) == 8 and date_str.isdigit():
+        date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+    print(f"[ECON] render_rollup_summary date_str: {date_str}")
+
+    # Resolve date_iso for econ panel
+    date_iso: Optional[str] = None
+    if date_str:
+        try:
+            datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            date_iso = date_str
+        except ValueError:
+            pass
+
+    # ── 1. Briefing Strip ─────────────────────────────────────────────────
+    briefing_strip = _build_briefing_strip(sections, meta)
+
+    # ── Page header ───────────────────────────────────────────────────────
+    page_header = html.Div(
+        [
+            html.H2(title, style={"color": HEADER_BG_COLOR, "marginBottom": "4px", "fontSize": "22px"}),
+            html.P(
+                f"{article_count} articles • {', '.join(providers)}",
+                style={"color": "#6c757d", "marginBottom": "10px", "fontSize": "13px"},
+            ),
+            # Expand all / Collapse all controls
+            html.Div(
+                [
+                    html.A(
+                        "Expand all",
+                        id="recap-expand-all",
+                        href="#",
+                        n_clicks=0,
+                        style={"fontSize": "12px", "color": "#007bff", "marginRight": "12px", "textDecoration": "none"},
+                    ),
+                    html.A(
+                        "Collapse all",
+                        id="recap-collapse-all",
+                        href="#",
+                        n_clicks=0,
+                        style={"fontSize": "12px", "color": "#6c757d", "textDecoration": "none"},
+                    ),
+                ],
+                style={"marginBottom": "12px"},
+            ),
+        ],
+        style={"padding": "14px 16px 0 16px"},
+    )
+
+    # ── 2. Today in 3 Bullets (TLDR) ─────────────────────────────────────
+    tldr = sections.get("tldr", [])
+    tldr_body: list = []
+    if tldr:
+        for item in tldr[:3]:
+            text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+            tldr_body.append(html.Div(
+                [
+                    html.Span("•", style={"color": HEADER_BG_COLOR, "fontWeight": "700", "marginRight": "8px", "fontSize": "16px"}),
+                    html.Span(text, style={"fontSize": "14px", "lineHeight": "1.5"}),
+                ],
+                style={"marginBottom": "8px", "display": "flex", "alignItems": "flex-start"},
+            ))
+        if len(tldr) > 3:
+            extra_id = "tldr-extra"
+            extra_rows = []
+            for item in tldr[3:]:
+                text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+                extra_rows.append(html.Div(
+                    [
+                        html.Span("•", style={"color": HEADER_BG_COLOR, "fontWeight": "700", "marginRight": "8px", "fontSize": "16px"}),
+                        html.Span(text, style={"fontSize": "14px", "lineHeight": "1.5"}),
+                    ],
+                    style={"marginBottom": "8px", "display": "flex", "alignItems": "flex-start"},
+                ))
+            tldr_body.append(html.Div(extra_rows, id=extra_id, style={"display": "none"}))
+            tldr_body.append(html.A(
+                f"Show all {len(tldr)} →",
+                id="tldr-showall",
+                href="#",
+                n_clicks=0,
+                style={"fontSize": "12px", "color": "#007bff", "textDecoration": "none"},
+            ))
+    else:
+        # Missing brief status line
+        tldr_body.append(html.P(
+            "Brief unavailable for this date",
+            style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+        ))
+
+    card_today = _build_card(
+        card_id="card-today",
+        title="Today in 3 Bullets",
+        body_children=tldr_body,
+        default_collapsed=False,
+        title_icon="📝",
+    )
+
+    # ── 3. Catalysts & Calendar ───────────────────────────────────────────
+    catalysts_body: list = []
+
+    # Consensus catalysts
+    catalysts = sections.get("consensus_catalysts", [])
+    if catalysts:
+        catalysts_body.append(html.P(
+            "Near-term catalysts",
+            style={"fontSize": "11px", "fontWeight": "600", "color": "#6c757d",
+                   "textTransform": "uppercase", "letterSpacing": "0.05em", "marginBottom": "6px"},
+        ))
+        for c in catalysts:
+            text = c.get("text", str(c)) if isinstance(c, dict) else str(c)
+            catalysts_body.append(html.Div(
+                [
+                    html.Span("📌", style={"marginRight": "6px"}),
+                    html.Span(text, style={"fontSize": "13px", "lineHeight": "1.45"}),
+                ],
+                style={"marginBottom": "5px"},
+            ))
+
+    # Economic events panel (structured rows)
+    if date_iso:
+        print(f"[ECON] render_rollup_summary: Adding events panel for {date_iso}")
+        econ_card = _render_econ_events_panel(date_iso, rollup_json, dynamics_mode=dynamics_mode, is_logged_in=is_logged_in)
+        if econ_card is not None:
+            catalysts_body.append(html.Div(style={"marginTop": "12px"}))
+            catalysts_body.append(econ_card)
+
+    if not catalysts_body:
+        catalysts_body.append(html.P(
+            "No catalyst data available.",
+            style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+        ))
+
+    card_catalysts = _build_card(
+        card_id="card-catalysts",
+        title="Catalysts & Calendar",
+        body_children=catalysts_body,
+        default_collapsed=False,
+        title_icon="📅",
+    )
+
+    # ── 4. Volatility Outlook ─────────────────────────────────────────────
+    vol_by_ac = sections.get("volatility_by_asset_class", {})
+    vol_body: list = []
+    if vol_by_ac:
+        for ac, vol_data in vol_by_ac.items():
+            ev = vol_data.get("expected_volatility", "?")
+            skew = vol_data.get("directional_skew", "Neutral")
+            conf = vol_data.get("confidence_score", 0)
+            ev_color = (
+                "#dc3545" if ev == "High" else
+                "#ffc107" if ev == "Medium" else
+                "#28a745"
+            )
+            skew_arrow = "↗️" if skew == "Bullish" else ("↘️" if skew == "Bearish" else "↔️")
+            vol_body.append(html.Div(
+                [
+                    html.Span(ac, style={"fontWeight": "600", "minWidth": "110px", "display": "inline-block", "fontSize": "13px"}),
+                    html.Span(
+                        ev,
+                        style={
+                            "display": "inline-block", "padding": "2px 8px", "borderRadius": "4px",
+                            "fontSize": "11px", "fontWeight": "600", "marginRight": "8px",
+                            "backgroundColor": ev_color, "color": "white",
+                        }
+                    ),
+                    html.Span(f"{skew_arrow} {skew}", style={"fontSize": "13px", "marginRight": "8px"}),
+                    html.Span(f"conf {conf:.1f}", style={"fontSize": "11px", "color": "#999"}),
+                ],
+                style={"marginBottom": "8px", "display": "flex", "alignItems": "center", "flexWrap": "wrap"},
+            ))
+    else:
+        vol_body.append(html.P(
+            "No volatility data available.",
+            style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+        ))
+
+    card_vol = _build_card(
+        card_id="card-vol",
+        title="Volatility Outlook",
+        body_children=vol_body,
+        default_collapsed=True,
+        title_icon="📊",
+    )
+
+    # ── 5. Risk Flags (warnings chips) ───────────────────────────────────
+    warnings = sections.get("warnings", [])
+    card_risk = _build_risk_flags_card(warnings, card_id="risk-flags")
+
+    # ── 6. Yesterday (observations) ──────────────────────────────────────
+    observations = sections.get("observations", {})
+    obs_body: list = []
+    if observations:
+        obs_body = _build_tagged_bullet_list(observations, card_id="obs", preview_per_group=3)
+    else:
+        obs_body.append(html.P(
+            "No observations available.",
+            style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+        ))
+
+    card_yesterday = _build_card(
+        card_id="card-yesterday",
+        title="Yesterday",
+        body_children=obs_body,
+        default_collapsed=True,
+        title_icon="🕐",
+    )
+
+    # ── 7. Forward Watch ─────────────────────────────────────────────────
+    forward_watch = sections.get("forward_watch", {})
+    fw_body: list = []
+    if forward_watch:
+        fw_body = _build_tagged_bullet_list(forward_watch, card_id="fw", preview_per_group=3)
+    else:
+        fw_body.append(html.P(
+            "No forward watch items available.",
+            style={"fontSize": "13px", "color": "#6c757d", "fontStyle": "italic"},
+        ))
+
+    card_forward = _build_card(
+        card_id="card-forward",
+        title="Forward Watch",
+        body_children=fw_body,
+        default_collapsed=True,
+        title_icon="🔭",
+    )
+
+    # ── 8. Articles / Trade Ideas ─────────────────────────────────────────
+    raw_trade_ideas = sections.get("trade_ideas", {})
+    _bucket_labels = {
+        "d_1_3": "1-3 Day (Tactical)",
+        "w_1_2": "1-2 Week (Swing)",
+        "gt_2w": ">2 Week (Position)",
+        "watchlist_only": "Watchlist Only",
+    }
+    _flat_ideas: list = []
+    if isinstance(raw_trade_ideas, dict):
+        for bucket_key, label in _bucket_labels.items():
+            for idea in raw_trade_ideas.get(bucket_key, []):
+                if isinstance(idea, dict):
+                    _flat_ideas.append((label, idea))
+    elif isinstance(raw_trade_ideas, list):
+        for idea in raw_trade_ideas:
+            if isinstance(idea, dict):
+                _flat_ideas.append((None, idea))
+
+    articles_body: list = []
+    if _flat_ideas:
+        for bucket_label, idea in _flat_ideas:
+            direction = (idea.get("direction", "") or "").upper()
+            instrument = idea.get("instrument", idea.get("product", "?"))
+            bias_color = "#28a745" if direction in ("LONG", "BULLISH") else (
+                "#dc3545" if direction in ("SHORT", "BEARISH") else "#6c757d"
+            )
+            card_children: list = [
+                html.Div([
+                    html.Span(f"{direction} {instrument}", style={"fontWeight": "bold", "fontSize": "15px", "marginRight": "10px"}),
+                    html.Span(
+                        bucket_label or idea.get("bias", ""),
+                        style={"display": "inline-block", "padding": "2px 8px", "borderRadius": "4px",
+                               "fontSize": "11px", "backgroundColor": bias_color, "color": "white"}
+                    ) if bucket_label or idea.get("bias") else None,
+                ], style={"marginBottom": "5px"}),
+            ]
+            trigger = idea.get("trigger", idea.get("catalyst", ""))
+            if trigger:
+                card_children.append(html.Div([
+                    html.Span("Trigger: ", style={"fontWeight": "500", "fontSize": "13px"}),
+                    html.Span(trigger, style={"fontSize": "13px"})
+                ], style={"marginBottom": "3px"}))
+            rationale = idea.get("rationale", "")
+            if rationale:
+                card_children.append(html.Div([
+                    html.Span("Rationale: ", style={"fontWeight": "500", "fontSize": "13px"}),
+                    html.Span(rationale, style={"fontSize": "13px"})
+                ], style={"marginBottom": "3px"}))
+            sources = idea.get("sources", [])
+            if sources:
+                card_children.append(html.Div(
+                    html.Span(f"Sources: {', '.join(sources)}", style={"fontSize": "12px", "color": "#666"}),
+                    style={"marginTop": "4px"}
+                ))
+            articles_body.append(html.Div(card_children, style={
+                "backgroundColor": "#f8f9fa", "padding": "10px 12px", "borderRadius": "4px",
+                "marginBottom": "8px", "borderLeft": f"3px solid {bias_color}",
+            }))
+
+    sources_list = sections.get("sources", [])
+    if sources_list:
+        articles_body.append(html.P(
+            "Sources",
+            style={"fontSize": "11px", "fontWeight": "600", "color": "#6c757d",
+                   "textTransform": "uppercase", "letterSpacing": "0.05em",
+                   "marginTop": "12px", "marginBottom": "6px"},
+        ))
+        for src in sources_list:
+            provider = src.get("provider", "")
+            titles = src.get("titles", [])
+            if provider and titles:
+                articles_body.append(html.Div(
+                    [
+                        html.Span(provider, style={"fontWeight": "600", "fontSize": "12px", "marginRight": "6px"}),
+                        html.Span(" · ".join(titles), style={"fontSize": "12px", "color": "#6c757d"}),
+                    ],
+                    style={"marginBottom": "4px"},
+                ))
+
+    # Only render the Trade Ideas card when there are actual ideas.
+    # When empty, hide the card entirely so it does not clutter the page.
+    # Sources remain implicit via the article sidebar.
+    if _flat_ideas:
+        card_articles = _build_card(
+            card_id="card-articles",
+            title="Macro Trade Ideas",
+            body_children=articles_body,
+            default_collapsed=True,
+            title_icon="💡",
+        )
+    else:
+        card_articles = None  # hidden when no ideas
+
+    # ── Layout assembly ───────────────────────────────────────────────────
+    # Left column (actionable today): cards 2, 3, 4
+    left_col = html.Div(
+        [card_today, card_catalysts, card_vol],
+        style={"flex": "1", "minWidth": "0"},
+    )
+    # Right column (context): cards 5, 6, 7
+    right_col = html.Div(
+        [card_risk, card_yesterday, card_forward],
+        style={"flex": "1", "minWidth": "0"},
+    )
+
+    # Two-column grid on xl screens (via inline style + CSS class for responsive override)
+    two_col = html.Div(
+        [left_col, right_col],
+        className="daily-recap-grid",
+        style={
+            "display": "flex",
+            "gap": "14px",
+            "alignItems": "flex-start",
+        },
+    )
+
+    # Inline <style> for responsive behaviour and sticky strip on desktop
+    # Dash has no html.Style component; use dcc.Markdown with dangerously_allow_html instead
+    responsive_css = dcc.Markdown(
+        """
+        <style>
+        .daily-briefing-strip { position: sticky; top: 0; z-index: 100; }
+        .daily-recap-grid { flex-direction: row; }
+        @media (max-width: 1199px) {
+            .daily-briefing-strip { position: static; }
+            .daily-recap-grid { flex-direction: column; }
+        }
+        </style>
+        """,
+        dangerously_allow_html=True,
+    )
+
+    return html.Div(
+        [
+            responsive_css,
+            briefing_strip,
+            html.Div(
+                [
+                    page_header,
+                    two_col,
+                    # card_articles is None when there are no macro trade ideas; skip rendering.
+                    *([html.Div(card_articles, style={"marginTop": "0"})] if card_articles is not None else []),
+                ],
+                style={"padding": "0 16px 20px 16px"},
+            ),
+        ]
+    )
+
+
+def render_rollup_sections_detail(sections: dict, date_str: str = "", rollup_json: Optional[dict] = None, dynamics_mode: bool = True) -> html.Div:
+    """
+    Legacy helper — kept for any callers outside the main rollup view.
+    Renders observations and forward_watch as tagged bullet lists.
+    """
+    children: list = []
+
+    observations = sections.get("observations", {})
+    if observations:
+        children.append(html.H4("What Happened Yesterday", style={"marginTop": "15px", "marginBottom": "10px", "color": "#004080"}))
+        children.extend(_build_tagged_bullet_list(observations, card_id="legacy-obs"))
+
+    forward_watch = sections.get("forward_watch", {})
+    if forward_watch:
+        children.append(html.H4("What to Watch Today", style={"marginTop": "20px", "marginBottom": "10px", "color": "#004080"}))
+        children.extend(_build_tagged_bullet_list(forward_watch, card_id="legacy-fw"))
+
+    return html.Div(children)
+
+
 @app.callback(
     [
         Output("daily-selected-artifact", "data"),
         Output("daily-view-content", "children")
     ],
     Input({"type": "daily-article-btn", "index": dash.dependencies.ALL}, "n_clicks"),
-    State("daily-articles-store", "data"),
+    [
+        State("daily-articles-store", "data"),
+        State("econ-dynamics-mode", "data"),
+        State("login-user", "data"),
+    ],
     prevent_initial_call=True
 )
-def display_daily_article_summary(n_clicks_list, artifacts):
+def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store, login_user_store):
     """
     Render the right-panel content for the selected artifact folder.
 
@@ -3157,22 +5879,161 @@ def display_daily_article_summary(n_clicks_list, artifacts):
 
     folder_key = triggered_id.get("index")
 
-    # --- Daily Summary placeholder ---
+    # --- Daily Summary - load and render rollup ---
     if folder_key == "__daily_summary__":
-        return "", html.Div([
-            html.H2(
-                "Daily Summary",
-                style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}
-            ),
-            html.P(
-                "Daily rollup summary coming soon...",
-                style={"color": "#999", "fontStyle": "italic"}
-            ),
-            html.P(
-                f"Found {len(artifacts)} artifacts for yesterday.",
-                style={"marginTop": "15px"}
-            )
-        ], style={"padding": "20px"})
+        # Extract date from artifacts (they all share the same date)
+        if artifacts and len(artifacts) > 0:
+            date_fmt = artifacts[0].get("date_fmt", "")
+            try:
+                target_date = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").date()
+                date_str = target_date.strftime("%Y%m%d")
+            except:
+                date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y%m%d")
+        else:
+            # No artifacts - determine date from default (yesterday)
+            target_date = datetime.date.today() - datetime.timedelta(days=1)
+            date_fmt = target_date.strftime("%Y-%m-%d")
+            date_str = target_date.strftime("%Y%m%d")
+        
+        # Handle explicit empty state when no articles exist
+        if not artifacts or len(artifacts) == 0:
+            _dyn_mode_empty = dynamics_mode_store if dynamics_mode_store is not None else True
+            _is_logged_in_empty = bool(login_user_store)
+            _live_events_panel_empty = None
+            
+            # Economic Events panel can still render even without articles
+            if date_fmt and ECON_CALENDAR_AVAILABLE:
+                try:
+                    _live_events_panel_empty = _render_econ_events_panel(
+                        date_fmt, None,
+                        dynamics_mode=_dyn_mode_empty,
+                        is_logged_in=_is_logged_in_empty,
+                    )
+                except Exception:
+                    _live_events_panel_empty = None
+            
+            # Render clean empty state
+            return "", html.Div([
+                html.Div([
+                    html.H3("No Articles", style={"color": HEADER_BG_COLOR, "marginBottom": "10px"}),
+                    html.P(
+                        "No articles were found for this date.",
+                        style={"fontSize": "15px", "marginBottom": "5px"}
+                    ),
+                    html.P(
+                        "If you expected content, check ingestion or filters.",
+                        style={"fontSize": "13px", "color": "#666", "fontStyle": "italic"}
+                    )
+                ], style={
+                    "backgroundColor": "#f9f9f9",
+                    "padding": "20px",
+                    "borderRadius": "4px",
+                    "border": "1px solid #ddd",
+                    "marginBottom": "20px"
+                }),
+                # Still show Economic Events if available
+                *([_live_events_panel_empty] if _live_events_panel_empty is not None else []),
+            ], style={"padding": "20px"})
+        
+        # Try to load rollup JSON
+        rollup_dir = Path(r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE\rollups\daily")
+        rollup_file = rollup_dir / f"ROLLUP_DAILY_{date_str}__sum.json"
+        
+        if rollup_file.exists():
+            try:
+                with open(rollup_file, "r", encoding="utf-8") as fh:
+                    rollup_json = json.load(fh)
+                
+                # Ensure date is in rollup_json meta if not present
+                if "meta" not in rollup_json:
+                    rollup_json["meta"] = {}
+                if "date" not in rollup_json["meta"] or not rollup_json["meta"]["date"]:
+                    # Convert YYYYMMDD to YYYY-MM-DD
+                    try:
+                        target_date = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").date()
+                        rollup_json["meta"]["date"] = date_fmt  # Already in YYYY-MM-DD format
+                    except:
+                        rollup_json["meta"]["date"] = date_fmt
+                
+                # Render rollup summary (dynamics_mode from session store; default True)
+                _dyn_mode = dynamics_mode_store if dynamics_mode_store is not None else True
+                _is_logged_in = bool(login_user_store)
+                content = render_rollup_summary(
+                    rollup_json, len(artifacts),
+                    dynamics_mode=_dyn_mode,
+                    is_logged_in=_is_logged_in,
+                )
+                return "", content
+                
+            except Exception as e:
+                # Format title as "Preparation for {date}"
+                try:
+                    date_display = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").strftime("%B %d, %Y")
+                    error_title = f"Preparation for {date_display}"
+                except:
+                    error_title = "Preparation for Today"
+                
+                return "", html.Div([
+                    html.H2(error_title, style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
+                    html.P(f"Error loading rollup: {e}", style={"color": "#dc3545"}),
+                    html.P(f"File: {rollup_file.name}", style={"fontSize": "12px", "color": "#999"})
+                ], style={"padding": "20px"})
+        else:
+            # Rollup doesn't exist — show helpful message plus live events from SQLite.
+            # The events panel is a pure DB read; no LLM is called here.
+            _dyn_mode_no_rollup = dynamics_mode_store if dynamics_mode_store is not None else True
+            _date_iso_no_rollup = date_fmt if date_fmt else None
+            _is_logged_in_no_rollup = bool(login_user_store)
+            _live_events_panel = None
+            if _date_iso_no_rollup and ECON_CALENDAR_AVAILABLE:
+                try:
+                    _live_events_panel = _render_econ_events_panel(
+                        _date_iso_no_rollup, None,
+                        dynamics_mode=_dyn_mode_no_rollup,
+                        is_logged_in=_is_logged_in_no_rollup,
+                    )
+                except Exception:
+                    _live_events_panel = None
+
+            # Format title as "Preparation for {date}"
+            try:
+                date_display = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").strftime("%B %d, %Y")
+                no_rollup_title = f"Preparation for {date_display}"
+            except:
+                no_rollup_title = "Preparation for Today"
+            
+            return "", html.Div([
+                html.H2(no_rollup_title, style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
+                html.Div([
+                    html.P(
+                        "📊 Daily rollup not yet generated for this date.",
+                        style={"fontSize": "16px", "marginBottom": "15px"}
+                    ),
+                    html.P(
+                        f"Found {len(artifacts)} articles from {date_fmt}.",
+                        style={"color": "#666", "marginBottom": "20px"}
+                    ),
+                    html.H4("Generate rollup:", style={"marginTop": "20px", "marginBottom": "10px"}),
+                    html.Pre(
+                        f'cd "c:\\Coding Projects\\TWIFO_Sharing"\npython generate_rollup_clean.py daily {date_fmt}',
+                        style={
+                            "backgroundColor": "#f5f5f5",
+                            "padding": "15px",
+                            "borderRadius": "4px",
+                            "fontSize": "13px",
+                            "fontFamily": "Consolas, monospace",
+                            "border": "1px solid #ddd"
+                        }
+                    ),
+                    html.P(
+                        f"Looking for: {rollup_file.name}",
+                        style={"fontSize": "11px", "color": "#999", "marginTop": "15px"}
+                    )
+                ], style={"backgroundColor": "#f9f9f9", "padding": "20px", "borderRadius": "4px"}),
+                # Live events panel — queried fresh from SQLite on every render.
+                # This section is completely independent of the snapshot above.
+                *([_live_events_panel] if _live_events_panel is not None else []),
+            ], style={"padding": "20px"})
 
     # --- Locate the selected artifact dict ---
     art = next(
@@ -3195,7 +6056,11 @@ def display_daily_article_summary(n_clicks_list, artifacts):
                 if is_stub_summary(sum_json):
                     content = render_failed_summary(sum_json, art["artifact_folder"])
                 else:
-                    content = render_summary_view(art["artifact_folder"], sum_json)
+                    content = render_summary_view(
+                        art["artifact_folder"],
+                        sum_json,
+                        display_provider=art.get("provider"),
+                    )
             else:
                 content = html.Div(
                     "Summary renderer not available.",
@@ -3301,7 +6166,209 @@ def display_daily_article_summary(n_clicks_list, artifacts):
 
 
 ############################
-# 9) RUN
+# 9b) DAILY RECAP INTERACTIVE CALLBACKS
+############################
+
+# ── Card collapse toggle (clientside) ─────────────────────────────────────────
+# One generic clientside callback handles ALL collapsible cards.
+# It reads/writes localStorage under key "recap_card_<card_id>".
+# The toggle button id pattern is  "<card_id>-toggle"
+# The body div id pattern is        "<card_id>-body"
+# The chevron span id pattern is    "<card_id>-chevron"
+
+_CARD_IDS = [
+    "card-today",
+    "card-catalysts",
+    "card-vol",
+    "risk-flags",
+    "card-yesterday",
+    "card-forward",
+    "card-articles",
+    "econ-events",
+]
+
+for _cid in _CARD_IDS:
+    app.clientside_callback(
+        f"""
+        function(n_clicks) {{
+            var bodyId   = '{_cid}-body';
+            var chevId   = '{_cid}-chevron';
+            var storeKey = 'recap_card_{_cid}';
+
+            var body  = document.getElementById(bodyId);
+            var chev  = document.getElementById(chevId);
+            if (!body) return window.dash_clientside.no_update;
+
+            var isHidden = (body.style.display === 'none');
+            // Toggle
+            body.style.display = isHidden ? 'block' : 'none';
+            if (chev) chev.innerText = isHidden ? '▲' : '▼';
+
+            // Persist to localStorage
+            try {{ localStorage.setItem(storeKey, isHidden ? 'open' : 'closed'); }} catch(e) {{}}
+
+            return window.dash_clientside.no_update;
+        }}
+        """,
+        Output(f"{_cid}-body", "style"),
+        Input(f"{_cid}-toggle", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+# ── Restore collapse state from localStorage on page load (clientside) ────────
+app.clientside_callback(
+    """
+    function(children) {
+        var cardIds = """ + str(_CARD_IDS).replace("'", '"') + """;
+        cardIds.forEach(function(cid) {
+            var storeKey = 'recap_card_' + cid;
+            var saved;
+            try { saved = localStorage.getItem(storeKey); } catch(e) { return; }
+            if (!saved) return;
+            var body = document.getElementById(cid + '-body');
+            var chev = document.getElementById(cid + '-chevron');
+            if (!body) return;
+            if (saved === 'open')   { body.style.display = 'block'; if (chev) chev.innerText = '▲'; }
+            if (saved === 'closed') { body.style.display = 'none';  if (chev) chev.innerText = '▼'; }
+        });
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-restored"),
+    Input("daily-view-content", "children"),
+    prevent_initial_call=True,
+)
+
+# ── Expand all / Collapse all (clientside) ────────────────────────────────────
+app.clientside_callback(
+    """
+    function(n_expand, n_collapse) {
+        var cardIds = """ + str(_CARD_IDS).replace("'", '"') + """;
+        var triggered = dash_clientside.callback_context.triggered;
+        if (!triggered || triggered.length === 0) return window.dash_clientside.no_update;
+        var prop_id = triggered[0].prop_id;
+        var doExpand = prop_id.includes('recap-expand-all');
+
+        cardIds.forEach(function(cid) {
+            var body = document.getElementById(cid + '-body');
+            var chev = document.getElementById(cid + '-chevron');
+            if (!body) return;
+            body.style.display = doExpand ? 'block' : 'none';
+            if (chev) chev.innerText = doExpand ? '▲' : '▼';
+            try { localStorage.setItem('recap_card_' + cid, doExpand ? 'open' : 'closed'); } catch(e) {}
+        });
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-expand"),
+    Input("recap-expand-all", "n_clicks"),
+    Input("recap-collapse-all", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# ── TLDR Show-all (clientside) ────────────────────────────────────────────────
+app.clientside_callback(
+    """
+    function(n) {
+        var el = document.getElementById('tldr-extra');
+        var link = document.getElementById('tldr-showall');
+        if (!el) return window.dash_clientside.no_update;
+        var hidden = (el.style.display === 'none');
+        el.style.display = hidden ? 'block' : 'none';
+        if (link) link.innerText = hidden ? '← Show fewer' : 'Show all →';
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-tldr"),
+    Input("tldr-showall", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# ── Risk-flag chip expansion (clientside — pattern match over all chips) ───────
+# We register a single document-level delegated click handler via a one-time
+# clientside callback that fires when the daily-view-content updates.
+app.clientside_callback(
+    """
+    function(children) {
+        // Delegate clicks on any risk-flags chip toggle
+        // (registered once; safe to re-register because handler checks dataset flag)
+        if (window._riskChipHandlerAttached) return window.dash_clientside.no_update;
+        document.addEventListener('click', function(e) {
+            var el = e.target;
+            if (!el || !el.id) return;
+            var m = el.id.match(/^risk-flags-chip-toggle-(\\d+)$/);
+            if (!m) return;
+            e.preventDefault();
+            var idx = m[1];
+            var detail = document.getElementById('risk-flags-chip-detail-' + idx);
+            if (!detail) return;
+            var hidden = (detail.style.display === 'none');
+            detail.style.display = hidden ? 'block' : 'none';
+            el.style.backgroundColor = hidden ? '#fff0b3' : '#fff3cd';
+        });
+        window._riskChipHandlerAttached = true;
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-chips"),
+    Input("daily-view-content", "children"),
+    prevent_initial_call=True,
+)
+
+# ── Risk-flags Show-all (clientside) ─────────────────────────────────────────
+app.clientside_callback(
+    """
+    function(n) {
+        // Show all chip wrappers that were hidden (index >= 5)
+        var i = 5;
+        while (true) {
+            var wrapper = document.getElementById('risk-flags-chip-wrapper-' + i);
+            if (!wrapper) break;
+            wrapper.style.display = 'inline-block';
+            i++;
+        }
+        var link = document.getElementById('risk-flags-showall');
+        if (link) link.style.display = 'none';
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-riskall"),
+    Input("risk-flags-showall", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# ── Tagged-list Show-all links (clientside — delegated) ──────────────────────
+app.clientside_callback(
+    """
+    function(children) {
+        if (window._taggedListHandlerAttached) return window.dash_clientside.no_update;
+        document.addEventListener('click', function(e) {
+            var el = e.target;
+            if (!el || !el.id) return;
+            // Pattern: <card_id>-<group_slug>-showall
+            if (!el.id.endsWith('-showall')) return;
+            e.preventDefault();
+            // Derive overflow id by replacing -showall with -overflow
+            var overflowId = el.id.replace('-showall', '-overflow');
+            var overflow = document.getElementById(overflowId);
+            if (!overflow) return;
+            var hidden = (overflow.style.display === 'none');
+            overflow.style.display = hidden ? 'block' : 'none';
+            el.innerText = hidden ? '← Show fewer' : el.dataset.originalText || 'Show all →';
+            if (!el.dataset.originalText) el.dataset.originalText = el.innerText;
+        });
+        window._taggedListHandlerAttached = true;
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("daily-view-content", "data-taglist"),
+    Input("daily-view-content", "children"),
+    prevent_initial_call=True,
+)
+
+
+############################
+# 10) RUN
 ############################
 
 if __name__ == "__main__":

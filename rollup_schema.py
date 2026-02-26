@@ -2,7 +2,7 @@
 Rollup JSON Schema Documentation
 Purpose: Define the exact schema for daily and weekly rollups
 Author: Kevin Lefebvre
-Last Updated: 2026-01-11
+Last Updated: 2026-02-16
 Schema: twifo.rollup.v1
 """
 
@@ -28,6 +28,9 @@ Structure:
         "min_articles_required": int,
         "article_count": int,
         "providers": ["BOA", "DB", ...],  # List of provider codes
+            # NOTE: Providers should be canonical firm names or short codes.
+            # Single-letter provider codes are rejected except legacy 'O' (Others).
+        "provider_detection": {"method": "str", "confidence": int},  # Optional: detection metadata
         "products": ["CT", "EUR", "JPY", ...],  # List of product codes
         "generated_at_iso": "ISO datetime string",
         "model": null | "model-name"
@@ -58,15 +61,15 @@ Structure:
     },
     "sections": {
         "tldr": [
-            {"text": "TLDR bullet", "sources": ["BOA", "DB"]},
+            {"text": "TLDR bullet", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["BOA", "DB"]},
             ...
         ],
         "observations": [
-            {"text": "Observation", "sources": ["BOA"]},
+            {"text": "Observation", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["BOA"]},
             ...
         ],
         "forward_watch": [
-            {"text": "Watch item", "sources": ["DB"]},
+            {"text": "Watch item", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["DB"]},
             ...
         ],
         "trade_ideas": {
@@ -90,19 +93,19 @@ Structure:
             "watchlist_only": [...]
         },
         "warnings": [
-            {"text": "Warning", "sources": ["BOA"]},
+            {"text": "Warning", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["BOA"]},
             ...
         ],
         "tips_reminders": [
-            {"text": "Tip", "sources": ["DB"]},
+            {"text": "Tip", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["DB"]},
             ...
         ],
         "cross_asset_impacts": [
-            {"text": "Impact", "sources": ["BOA"]},
+            {"text": "Impact", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["BOA"]},
             ...
         ],
         "scenarios": [
-            {"text": "Scenario", "sources": ["DB"]},
+            {"text": "Scenario", "ai_context": "Plain-English explanation of macro impact for non-experts", "sources": ["DB"]},
             ...
         ],
         "sources": [
@@ -114,6 +117,16 @@ Structure:
         ]
     }
 }
+
+Bullet Fields:
+- text: The bullet content (required)
+- ai_context: Plain-English 1-2 sentence explanation of macro/product impact for non-experts (optional, added v1.1)
+- sources: List of provider codes that support the claim (required)
+
+Equity Tagging:
+- Individual stock bullets are suppressed unless the ticker is market-moving
+  (AAPL, MSFT, AMZN, NVDA, GOOGL, META, TSLA, BRK.B, JPM, GS, MS, BAC, WFC, C, V)
+- Surviving equity bullets are prefixed with [EQUITY: TICKER] in the text field
 
 Trade Idea Timeframe Buckets:
 - d_1_3: 1-3 days (tactical)

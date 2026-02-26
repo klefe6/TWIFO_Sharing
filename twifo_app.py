@@ -96,6 +96,16 @@ def _detect_provider(folder_name: str) -> str:
     return "Unknown"
 
 
+def _extract_frequency_from_slug(slug: str) -> str:
+    """
+    Extract frequency suffix from slug.
+    
+    Returns: 'w', 'd', 'm', 'q', 'y', or 'u' (unknown)
+    """
+    match = re.search(r"[_\-]([wdmuqy])$", slug)
+    return match.group(1) if match else "u"
+
+
 def _title_from_folder(folder_name: str) -> str:
     """
     Derive a human-readable title from an artifact folder name.
@@ -119,12 +129,60 @@ def _title_from_folder(folder_name: str) -> str:
     slug = re.sub(r"_?\d{8}", "", slug)
 
     # Remove trailing frequency suffixes (_w, _d, _m, _u, _q)
-    slug = re.sub(r"[_\-]([wdmuq])$", "", slug)
+    slug = re.sub(r"[_\-]([wdmuqy])$", "", slug)
 
-    # Underscore → space, collapse whitespace, title-case
-    title = slug.replace("_", " ").replace("-", " ").strip()
+    # Underscore → space, collapse whitespace
+    title = slug.replace("_", " ").strip()
     title = re.sub(r"\s+", " ", title)
+    
+    # Replace single dash with space, but preserve double dash (e.g., "--02-10")
+    title = re.sub(r'(?<!-)-(?!-)', ' ', title)
+    
+    # Title case each word
     return title.title() if title else folder_name
+
+
+def resolve_display_title(artifact_folder: str, meta_title: str = None, sum_json: dict = None) -> str:
+    """
+    Shared title resolver used across all views (Buttons, Daily View, Library).
+    
+    Resolution priority:
+        1. meta.title if present, non-empty, and looks clean (no underscores/dates)
+        2. Derived title from artifact_folder using _title_from_folder
+        3. Final fallback to artifact_folder if both fail
+    
+    Args:
+        artifact_folder: Artifact folder name (e.g., "20260211__GM__weekly_municipal...")
+        meta_title: Optional title from sum.json meta.title
+        sum_json: Optional full sum.json dict (will extract meta.title if provided)
+    
+    Returns:
+        Clean, human-readable title string
+    
+    Examples:
+        >>> resolve_display_title("20260211__O__weekly_municipal_monitor_seasonal_strength_02_10_20260211_w__abc123")
+        'Weekly Municipal Monitor Seasonal Strength 02 10'
+        
+        >>> resolve_display_title("20260211__GM__foo__abc", meta_title="Clean Title from LLM")
+        'Clean Title from LLM'
+    """
+    # Extract meta_title from sum_json if provided
+    if sum_json and not meta_title:
+        meta_title = sum_json.get("meta", {}).get("title", "")
+    
+    # Priority 1: Use meta.title if it's clean (no underscores or embedded dates)
+    if meta_title and isinstance(meta_title, str):
+        meta_title = meta_title.strip()
+        if meta_title and "_" not in meta_title and not re.search(r'\d{8}', meta_title):
+            return meta_title
+    
+    # Priority 2: Derive clean title from folder name
+    derived_title = _title_from_folder(artifact_folder)
+    if derived_title and derived_title != artifact_folder:
+        return derived_title
+    
+    # Priority 3: Fallback to folder name (should rarely happen)
+    return artifact_folder
 
 
 def get_yesterday_artifacts() -> List[Dict]:
@@ -154,7 +212,7 @@ def get_artifacts_for_date(target_date: date) -> List[Dict]:
         target_date: The date to search for (as date object)
     
     Returns:
-        List of dicts with artifact metadata
+        List of dicts with artifact metadata including frequency
     """
     debug = os.getenv("TWIFO_DEBUG_DAILY_VIEW")
 
@@ -170,10 +228,11 @@ def get_artifacts_for_date(target_date: date) -> List[Dict]:
         return []
 
     # Collect all matching sub-folders
-    # Convention: folder name contains _YYYYMMDD_ somewhere (usually after prefix)
+    # New convention: YYYYMMDD__PROVIDER__slug__hash
+    # Old convention (legacy): folders may contain _YYYYMMDD_ anywhere
     matched_dirs: List[Path] = sorted(
         d for d in ARTIFACTS_DIR.iterdir()
-        if d.is_dir() and f"_{date_str}_" in d.name
+        if d.is_dir() and (d.name.startswith(f"{date_str}__") or f"_{date_str}_" in d.name)
     )
 
     if debug:
@@ -191,16 +250,36 @@ def get_artifacts_for_date(target_date: date) -> List[Dict]:
         has_json = sum_json_path.is_file()
         has_pdf = sum_pdf_path.is_file()
 
-        # Extract provider and title — prefer sum.json meta when available
+        # Extract provider, title, and frequency from folder name
         provider = _detect_provider(folder_name)
         title = _title_from_folder(folder_name)
+        
+        # Extract frequency from slug
+        seg = _parse_folder_segments(folder_name)
+        frequency_code = _extract_frequency_from_slug(seg["slug"])
 
+        # Prefer sum.json meta when available, but fallback to folder-derived for bad values
         if has_json:
             try:
                 with open(sum_json_path, "r", encoding="utf-8") as fh:
                     meta = json.load(fh).get("meta", {})
-                provider = meta.get("provider", provider)
-                title = meta.get("title", title)
+                json_provider = meta.get("provider", "")
+                json_title = meta.get("title", "")
+                json_horizon = meta.get("horizon", "")
+                
+                # Use json provider only if it's not "O" (Others), otherwise keep folder-derived
+                if json_provider and json_provider != "O":
+                    provider = json_provider
+                
+                # Use json title only if it looks cleaned (no underscores or embedded dates)
+                # If it still has underscores or looks like filename, use folder-derived
+                if json_title and "_" not in json_title and not re.search(r'\d{8}', json_title):
+                    title = json_title
+                # else: keep folder-derived title which is already cleaned
+                
+                # Use horizon from meta if available and not "u", otherwise use extracted frequency
+                if json_horizon and json_horizon != "u":
+                    frequency_code = json_horizon
             except Exception:
                 pass  # fall back to folder-derived values
 
@@ -213,11 +292,12 @@ def get_artifacts_for_date(target_date: date) -> List[Dict]:
             "artifact_folder": folder_name,
             "provider": provider,
             "title": title,
+            "frequency_code": frequency_code,  # 'w', 'd', 'm', 'q', 'y', or 'u'
             "date_fmt": date_fmt,
             "has_sum_json": has_json,
             "has_sum_pdf": has_pdf,
             "sum_json_path": str(sum_json_path) if has_json else "",
-            "sum_pdf_path": str(sum_pdf_path) if has_pdf else "",
+            "sum_pdf_path": str(sum_pdf_path) if has_json else "",
         })
 
     if debug:

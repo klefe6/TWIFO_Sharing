@@ -1,0 +1,57 @@
+--- a/TWIFO_Sharing/rollups.py
++++ b/TWIFO_Sharing/rollups.py
+@@ -722,7 +722,7 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
+         },
+         "ui": {
+-            "title": f"{_format_date_human(date_obj)} Daily Recap",
++            "title": f"Preparation for {_format_date_human(date_obj)}",
+             "header_pills": [
+                 _pill(", ".join(providers), "provider"),
+                 _pill(date_obj.strftime("%b %d, %Y"), "date"),
+
+--- a/TWIFO_Sharing/twifo.py
++++ b/TWIFO_Sharing/twifo.py
+@@ -5448,7 +5448,7 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode:
+     sections = rollup_json.get("sections", {})
+     ui = rollup_json.get("ui", {})
+ 
+-    title = ui.get("title", "Daily Summary")
++    title = ui.get("title", "Preparation for Today")
+     providers = meta.get("providers", [])
+     date_str = meta.get("date", "")
+ 
+@@ -5968,9 +5968,16 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store
+                 
+             except Exception as e:
++                # Format title as "Preparation for {date}"
++                try:
++                    date_display = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").strftime("%B %d, %Y")
++                    error_title = f"Preparation for {date_display}"
++                except:
++                    error_title = "Preparation for Today"
++                
+                 return "", html.Div([
+-                    html.H2("Daily Summary", style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
++                    html.H2(error_title, style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
+                     html.P(f"Error loading rollup: {e}", style={"color": "#dc3545"}),
+                     html.P(f"File: {rollup_file.name}", style={"fontSize": "12px", "color": "#999"})
+                 ], style={"padding": "20px"})
+         else:
+@@ -5989,8 +5996,15 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store
+                 except Exception:
+                     _live_events_panel = None
+ 
++            # Format title as "Preparation for {date}"
++            try:
++                date_display = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").strftime("%B %d, %Y")
++                no_rollup_title = f"Preparation for {date_display}"
++            except:
++                no_rollup_title = "Preparation for Today"
++            
+             return "", html.Div([
+-                html.H2("Daily Summary", style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
++                html.H2(no_rollup_title, style={"color": HEADER_BG_COLOR, "marginBottom": "20px"}),
+                 html.Div([
+                     html.P(
+                         "📊 Daily rollup not yet generated for this date.",
+

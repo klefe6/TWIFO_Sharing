@@ -117,6 +117,9 @@ USER_PROMPT = (
     '    "RULE: EVERY number used anywhere in this JSON must have an entry here. '
     'If you cannot provide source_quote, drop the number from the entire output."\n'
     "  ],\n\n"
+    # -- provider (firm extraction) --
+    '  "provider": "Provider name (e.g. Goldman Sachs, ING, JPMorgan, Morgan Stanley, Citi) or Others",\n'
+    '  "provider_extraction_rule": "Extract firm name from headers/footers, email domains (e.g., @gs.com -> Goldman Sachs), author lines (e.g., \\"Jane Doe, Morgan Stanley\\"), or disclaimers. If found return firm name; if unsure return Unknown. Known firms: Goldman Sachs, ING, JPMorgan, Morgan Stanley, Citi.",\n'
 
     # -- what_moved_today --
     '  "what_moved_today": [\n'
@@ -204,6 +207,10 @@ USER_PROMPT = (
     "what_can_move_tomorrow, what_occurred, forward_watch, warnings, tips_reminders, "
     "cross_asset_impacts, scenarios, trade_ideas): output [] if the article does not "
     "explicitly support that content. NEVER pad with filler or generic language.\n"
+    "7. provider extraction: As an additional mandatory task, attempt to extract the firm's name from the document. "
+    "Check in the following order: (1) headers/footers, (2) email domains (e.g., @gs.com -> Goldman Sachs), "
+    "(3) author lines (e.g., 'Jane Doe, Morgan Stanley'), (4) disclaimers. If a known firm is confidently identified, "
+    "return the canonical firm name (Goldman Sachs, ING, JPMorgan, Morgan Stanley, Citi). If a firm is identified but not in the known list, return 'Others'. If unsure, return 'Unknown'. Output as the scalar field: \"provider\": \"<firm_name>\" or \"provider\": \"Others\".\n"
     "7. Empty arrays = []. Empty scalars = \"(none)\". "
     "NEVER use [\"(none)\"] or [\"(not provided in inputs)\"].\n"
     "8. Two different articles MUST produce different tldr, different "
@@ -229,3 +236,29 @@ def prompt_sha256(system_prompt: str = SYSTEM_PROMPT, user_prompt: str = USER_PR
 def prompt_source_file() -> str:
     """Return resolved path to this module for provenance."""
     return str(Path(__file__).resolve())
+
+
+def validate_provider(extracted_name: str):
+    """
+    Validate AI-extracted provider name and return (provider, confidence).
+
+    Rules:
+    - If extracted_name is one of KNOWN firms, return it with 95 confidence.
+    - If extracted_name == "Unknown", return ("Others", 0).
+    - If extracted_name is multi-word (likely a firm), return it with 70 confidence.
+    - Otherwise return ("Others", 0).
+    """
+    KNOWN = ["Goldman Sachs", "ING", "Morgan Stanley", "JPMorgan", "Citi"]
+
+    if not extracted_name or not isinstance(extracted_name, str):
+        return "Others", 0
+
+    name = extracted_name.strip()
+    if name in KNOWN:
+        return name, 95
+    elif name == "Unknown":
+        return "Others", 0
+    elif len(name.split()) >= 2:  # Multi-word firm
+        return name, 70
+    else:
+        return "Others", 0

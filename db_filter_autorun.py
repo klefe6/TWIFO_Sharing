@@ -151,7 +151,11 @@ SKIP_SUMMARY_IF_UNREADABLE = True # if still unreadable, don't call LLM summariz
 DEFAULT_KEEP = [
     "Annual","Weekly","Monthly","Quarterly",
     "Commodity","Commodities","Gold","Bitcoin","SOFR","Interest Rates", "CTAs", "CFTC", "CME", "BNY",
-    "Macro Insight","Metals","Silver"
+    "Macro Insight","Metals","Silver",
+    # Sector triggers
+    "Health Care","Real Estate","XLB","Materials","XLU","Utilities",
+    "Consumer Staples","Financials","Consumer Discretionary","Energy","Industrials",
+    "Communications","Technology","Consumer Goods",
 ]
 DEFAULT_SKIP = [
     "Earnings", "Daily", "Morning", "Equity", "Stocks", "Briefing", "Brief", "Intell", "Commentary",
@@ -374,7 +378,6 @@ def ocr_pdf_in_place(input_pdf: Path, output_pdf: Path) -> tuple[bool, str]:
         cmd = [
             "ocrmypdf",
             "--force-ocr",          # always OCR even if it thinks there is text
-            "--skip-text",          # don't OCR pages that already have text (optional; remove if you want full OCR)
             "--deskew",
             "--rotate-pages",
             "--output-type", "pdf",
@@ -1310,7 +1313,7 @@ def main():
                     save_daily_rollup(rollup, target_day)
                     print(f"[OK] Daily rollup created for {target_day}")
                 else:
-                    print(f"[INFO] No daily rollup created for {target_day} (insufficient articles or already exists)")
+                    print(f"[INFO] No daily rollup created for {target_day} (insufficient articles)")
             except Exception as e:
                 print(f"[WARN] Failed to generate daily rollup for {target_day}: {e}")
 

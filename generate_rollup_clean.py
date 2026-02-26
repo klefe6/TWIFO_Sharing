@@ -66,10 +66,25 @@ def get_iso_week(date_obj: date) -> tuple[int, int]:
 def find_article_summaries_for_date(target_date: date) -> List[Path]:
     """
     Find all article summary JSON files for a specific date.
-    Assumes naming: *_YYYYMMDD_*__sum.json
+    Supports both legacy (*_YYYYMMDD_*__sum.json) and new (artifacts/YYYYMMDD__*/sum.json) formats.
     """
     date_str = target_date.strftime("%Y%m%d")
-    return sorted(FILES_DIR.glob(f"*_{date_str}_*__sum.json"))
+    json_files = []
+    
+    # Try new artifacts folder structure first
+    artifacts_dir = FILES_DIR / "artifacts"
+    if artifacts_dir.exists():
+        for folder in artifacts_dir.iterdir():
+            if folder.is_dir() and folder.name.startswith(f"{date_str}__"):
+                sum_json = folder / "sum.json"
+                if sum_json.exists():
+                    json_files.append(sum_json)
+    
+    # Also check for legacy files in root
+    legacy_files = sorted(FILES_DIR.glob(f"*_{date_str}_*__sum.json"))
+    json_files.extend(legacy_files)
+    
+    return sorted(set(json_files))  # Dedupe and sort
 
 def collect_daily_articles(target_date: date, min_articles: int = 1) -> List[Dict]:
     """

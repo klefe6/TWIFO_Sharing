@@ -1,0 +1,63 @@
+--- a/TWIFO_Sharing/twifo.py
++++ b/TWIFO_Sharing/twifo.py
+@@ -5882,13 +5882,57 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store
+     # --- Daily Summary - load and render rollup ---
+     if folder_key == "__daily_summary__":
+         # Extract date from artifacts (they all share the same date)
+         if artifacts and len(artifacts) > 0:
+             date_fmt = artifacts[0].get("date_fmt", "")
+             try:
+                 target_date = datetime.datetime.strptime(date_fmt, "%Y-%m-%d").date()
+                 date_str = target_date.strftime("%Y%m%d")
+             except:
+                 date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y%m%d")
+         else:
+-            date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y%m%d")
++            # No artifacts - determine date from default (yesterday)
++            target_date = datetime.date.today() - datetime.timedelta(days=1)
++            date_fmt = target_date.strftime("%Y-%m-%d")
++            date_str = target_date.strftime("%Y%m%d")
++        
++        # Handle explicit empty state when no articles exist
++        if not artifacts or len(artifacts) == 0:
++            _dyn_mode_empty = dynamics_mode_store if dynamics_mode_store is not None else True
++            _is_logged_in_empty = bool(login_user_store)
++            _live_events_panel_empty = None
++            
++            # Economic Events panel can still render even without articles
++            if date_fmt and ECON_CALENDAR_AVAILABLE:
++                try:
++                    _live_events_panel_empty = _render_econ_events_panel(
++                        date_fmt, None,
++                        dynamics_mode=_dyn_mode_empty,
++                        is_logged_in=_is_logged_in_empty,
++                    )
++                except Exception:
++                    _live_events_panel_empty = None
++            
++            # Render clean empty state
++            return "", html.Div([
++                html.Div([
++                    html.H3("No Articles", style={"color": HEADER_BG_COLOR, "marginBottom": "10px"}),
++                    html.P(
++                        "No articles were found for this date.",
++                        style={"fontSize": "15px", "marginBottom": "5px"}
++                    ),
++                    html.P(
++                        "If you expected content, check ingestion or filters.",
++                        style={"fontSize": "13px", "color": "#666", "fontStyle": "italic"}
++                    )
++                ], style={
++                    "backgroundColor": "#f9f9f9",
++                    "padding": "20px",
++                    "borderRadius": "4px",
++                    "border": "1px solid #ddd",
++                    "marginBottom": "20px"
++                }),
++                # Still show Economic Events if available
++                *([_live_events_panel_empty] if _live_events_panel_empty is not None else []),
++            ], style={"padding": "20px"})
+         
+         # Try to load rollup JSON
+         rollup_dir = Path(r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE\rollups\daily")
+

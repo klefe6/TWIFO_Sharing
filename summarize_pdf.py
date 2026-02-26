@@ -783,6 +783,23 @@ def _summarize_with_quality_retry(
             # Step D.7: Critic pass (structural cleanup — dedup, quotes, numerics)
             sum_json = critic_pass(sum_json, text)
 
+            # --- Provider validation & detection metadata (wire validate_provider) ---
+            try:
+                raw_provider = sum_json.get("meta", {}).get("provider", "Unknown")
+                from twifo_prompts.prompts.article_prompts import validate_provider
+
+                validated_provider, confidence = validate_provider(raw_provider)
+
+                sum_json.setdefault("meta", {})["provider"] = validated_provider
+                sum_json["meta"]["provider_detection"] = {
+                    "method": "ai_extraction" if confidence > 0 else "fallback",
+                    "confidence": int(confidence),
+                    "original_value": raw_provider,
+                }
+            except Exception as _:
+                # If validation fails, keep existing provider and do not block summarization
+                pass
+
             return sum_json
 
         print(f"[QUALITY GATE] Failed on attempt {attempt_count}: {quality_reason}")
@@ -3740,8 +3757,20 @@ def summarize_pdf(
 
     # Parse metadata from filename
     filename = pdf_path.stem
-    provider = "O"
-    for prefix, code in [("BOA_", "BOA"), ("DB_", "DB"), ("MUFG_", "MUFG")]:  # Add more as needed
+    
+    # Provider detection using full prefix map
+    PROVIDER_PREFIXES = {
+        "BOA_": "BOA", "BA_": "BA", "BR_": "BR", "DB_": "DB", "GM_": "GM",
+        "HT_": "HT", "JPM_": "JPM", "MZ_": "MZ", "TSL_": "TSL", "T_": "T",
+        "WF_": "WF", "SEB_": "SEB", "R_": "R", "MUFG_": "MUFG", "ANZ_": "ANZ",
+        "BCA_": "BCA", "BNPP_": "BNPP", "BNY_": "BNY", "CACIB_": "CACIB",
+        "CITI_": "CITI", "HSBC_": "HSBC", "ING_": "ING", "MS_": "MS",
+        "NOM_": "NOM", "RBC_": "RBC", "SG_": "SG", "STI_": "STI",
+        "TME_": "TME", "UBS_": "UBS",
+    }
+    
+    provider = "O"  # Default to "Others"
+    for prefix, code in PROVIDER_PREFIXES.items():
         if filename.startswith(prefix):
             provider = code
             break

@@ -1091,6 +1091,51 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
             spaceAfter=6
         )
         
+        ai_context_style = ParagraphStyle(
+            'AIContext',
+            parent=styles['Normal'],
+            fontSize=10,
+            fontName='Helvetica-Oblique',
+            textColor=colors.HexColor("#5A6A7A"),
+            leftIndent=20,
+            leading=13,
+            spaceBefore=1,
+            spaceAfter=8,
+        )
+        
+        equity_badge_style = ParagraphStyle(
+            'EquityBadge',
+            parent=styles['Normal'],
+            fontSize=9,
+            fontName='Helvetica-Bold',
+            textColor=colors.HexColor("#6C3483"),
+            leftIndent=12,
+            leading=12,
+            spaceAfter=2,
+        )
+        
+        def _render_bullet_with_context(item, container: list) -> None:
+            """Render a bullet item with optional [EQUITY] badge and ai_context."""
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            sources = item.get("sources", []) if isinstance(item, dict) else []
+            ai_context = item.get("ai_context", "") if isinstance(item, dict) else ""
+            sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
+
+            # Detect and render equity badge
+            import re as _re
+            eq_match = _re.match(r"\[EQUITY:\s*([A-Z.]+)\]\s*", text)
+            if eq_match:
+                ticker = eq_match.group(1)
+                text = text[eq_match.end():]
+                container.append(Paragraph(
+                    f"[EQUITY: {ticker}]", equity_badge_style
+                ))
+
+            container.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+
+            if ai_context:
+                container.append(Paragraph(ai_context, ai_context_style))
+
         # Check if this is new schema (has flat sections) or old schema (has by_category)
         by_category = sections.get("by_category", {})
         has_new_schema = not by_category and (
@@ -1107,10 +1152,7 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
             if tldr_items:
                 story.append(Paragraph("📋 TLDR", section_header_style))
                 for item in tldr_items:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1132,29 +1174,19 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 for product in sorted_products:
                     items = observations.get(product, [])
                     if items:
-                        # KeepTogether for each product group (subheader + bullets) to avoid orphaned titles
                         product_group = []
                         product_group.append(Paragraph(f"<b>{product}</b>", subheader_style))
                         for item in items:
-                            text = item.get("text", "") if isinstance(item, dict) else str(item)
-                            sources = item.get("sources", []) if isinstance(item, dict) else []
-                            
-                            # Only show sources if > 1 (no product parentheses - product is already the header)
-                            sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                            product_group.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                            _render_bullet_with_context(item, product_group)
                         product_group.append(Spacer(1, 0.05*inch))
                         story.append(KeepTogether(product_group))
                 story.append(Spacer(1, 0.15*inch))
             elif observations and isinstance(observations, list):
-                # Fallback for old format (list)
                 story.append(create_section_divider())
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("What Occurred", section_header_style))
                 for item in observations:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1297,29 +1329,19 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 for product in sorted_products:
                     items = forward_watch.get(product, [])
                     if items:
-                        # KeepTogether for each product group (subheader + bullets) to avoid orphaned titles
                         product_group = []
                         product_group.append(Paragraph(f"<b>{product}</b>", subheader_style))
                         for item in items:
-                            text = item.get("text", "") if isinstance(item, dict) else str(item)
-                            sources = item.get("sources", []) if isinstance(item, dict) else []
-                            
-                            # Only show sources if > 1 (no product parentheses - product is already the header)
-                            sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                            product_group.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                            _render_bullet_with_context(item, product_group)
                         product_group.append(Spacer(1, 0.05*inch))
                         story.append(KeepTogether(product_group))
                 story.append(Spacer(1, 0.15*inch))
             elif forward_watch and isinstance(forward_watch, list):
-                # Fallback for old format (list)
                 story.append(create_section_divider())
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("🔭 Forward Watch", section_header_style))
                 for item in forward_watch:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1331,10 +1353,7 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("⚠️ WARNINGS", section_header_style))
                 for item in warnings:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1346,10 +1365,7 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("💡 TIPS & REMINDERS", section_header_style))
                 for item in tips:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1361,10 +1377,7 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("🔗 CROSS-ASSET IMPACTS", section_header_style))
                 for item in cross_asset:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
             
             # =========================
@@ -1376,10 +1389,7 @@ def render_rollup_pdf(json_path: Path, output_path: Optional[Path], rollup: dict
                 story.append(Spacer(1, 0.1*inch))
                 story.append(Paragraph("🎯 SCENARIOS", section_header_style))
                 for item in scenarios:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    sources = item.get("sources", []) if isinstance(item, dict) else []
-                    sources_str = f" <i>({', '.join(sources)})</i>" if len(sources) > 1 else ""
-                    story.append(Paragraph(f"• {text}{sources_str}", bullet_style))
+                    _render_bullet_with_context(item, story)
                 story.append(Spacer(1, 0.15*inch))
         
         elif by_category:
