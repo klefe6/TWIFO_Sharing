@@ -1,0 +1,125 @@
+================================================================================
+SPLIT-SCREEN LAYOUT FIX - Daily View Article Detail
+================================================================================
+
+PROBLEM
+-------
+In Daily View article detail mode, Summary and Original panes were stacking
+vertically instead of displaying side by side.
+
+CAUSE
+-----
+- Parent container had flexWrap: "wrap" 
+- Each child had minWidth: "400px"
+- When total width < 800px, panes would wrap and stack
+
+SOLUTION
+--------
+Changed flex layout to force side-by-side display:
+
+1. Parent Container (lines ~6110-6115):
+   - Added: flexDirection: "row"
+   - Added: width: "100%"
+   - Changed: gap from "10px" to "16px"
+   - Removed: flexWrap: "wrap"
+
+2. Child Panes (lines ~6088-6108):
+   - Changed: flex from "0 0 45%" / "0 0 55%" to "1"
+   - Changed: minWidth from "400px" to "0"
+
+3. PDF Iframe (lines ~6002-6009):
+   - Changed: height from "calc(100vh - 240px)" to "75vh"
+   - Added: display: "block"
+   - Kept: width: "100%"
+
+================================================================================
+CHANGES MADE
+================================================================================
+
+File: twifo.py
+
+Location: _build_split_screen_layout() function (lines ~6085-6115)
+
+BEFORE:
+-------
+Parent style:
+  display: flex
+  gap: 10px
+  flexWrap: wrap  <-- Caused stacking
+
+Child style:
+  flex: 0 0 45% / 0 0 55%  <-- Fixed widths
+  minWidth: 400px  <-- Triggered wrapping
+
+Iframe style:
+  height: calc(100vh - 240px)  <-- Too tall
+
+AFTER:
+------
+Parent style:
+  display: flex
+  flexDirection: row  <-- NEW: Force row layout
+  gap: 16px  <-- Increased from 10px
+  width: 100%  <-- NEW: Full width
+
+Child style:
+  flex: 1  <-- Equal flex grow
+  minWidth: 0  <-- Allow shrinking
+
+Iframe style:
+  width: 100%
+  height: 75vh  <-- Constrained height
+  display: block  <-- NEW: Block display
+
+================================================================================
+RESULT
+================================================================================
+
+✓ Summary and Original panes now display side by side
+✓ Each pane takes 50% width (flex: 1 on both)
+✓ Panes can shrink below 400px if needed
+✓ PDF iframe constrained to 75vh (prevents overflow)
+✓ No stacking on normal desktop screens
+✓ Daily Summary page unchanged (different code path)
+
+================================================================================
+TESTING
+================================================================================
+
+Test Steps:
+1. Navigate to Daily View
+2. Click on any individual article
+3. Verify split-screen appears with Summary on left, Original on right
+4. Verify both panes are side by side (not stacked)
+5. Verify PDF displays correctly in right pane
+6. Resize browser window - verify layout stays side by side
+
+Expected:
+- Summary pane on left (50% width)
+- Original pane on right (50% width)
+- No vertical stacking
+- Clean 16px gap between panes
+
+================================================================================
+FILES CHANGED
+================================================================================
+
+Modified:
+- twifo.py (lines ~6002-6115)
+  * _render_original_article_pane() - iframe styling
+  * _build_split_screen_layout() - container and child styling
+
+NOT Modified:
+- Daily Summary page (unchanged - different render path)
+- rollups.py (unchanged)
+- All other files (unchanged)
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+✓ Diff patch: split_screen_layout_fix.patch
+✓ Quick note: This file (SPLIT_SCREEN_LAYOUT_FIX.txt)
+
+================================================================================
+

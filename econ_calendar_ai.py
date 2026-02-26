@@ -186,6 +186,55 @@ def _build_brief_prompt(
 
     ctx_block = macro_context_text.strip() if macro_context_text else "(No rollup context available.)"
 
+    # ── Analyze currency/region composition ──────────────────────────────
+    # Collect currencies from top events to build region-specific guidance
+    currencies_present: set[str] = set()
+    for evt in sorted_events[:5]:  # Only check top 5 events
+        currency = (evt.get("currency_tag") or "").strip().upper()
+        if currency:
+            currencies_present.add(currency)
+
+    # Build currency-specific reaction templates
+    currency_guidance_lines = []
+    
+    if "USD" in currencies_present:
+        currency_guidance_lines.append(
+            "USD events: Primary impact on DXY, US10Y, ES, SPX, GC. "
+            "Mention typical timing (e.g., '08:30 ET') if relevant."
+        )
+    
+    if "EUR" in currencies_present:
+        currency_guidance_lines.append(
+            "EUR events: Primary impact on EURUSD, Bund yields, Euro Stoxx, DAX. "
+            "USD, ES, GC are SECONDARY spillover only (use language like 'may spill over')."
+        )
+    
+    if "GBP" in currencies_present:
+        currency_guidance_lines.append(
+            "GBP events: Primary impact on GBPUSD, Gilts, FTSE. "
+            "USD markets are SECONDARY spillover only."
+        )
+    
+    if "JPY" in currencies_present:
+        currency_guidance_lines.append(
+            "JPY events (including BOJ): Primary impact on USDJPY, JGB, Nikkei. "
+            "USD markets are SECONDARY spillover only."
+        )
+    
+    if "CNY" in currencies_present or "CHF" in currencies_present or "AUD" in currencies_present or "CAD" in currencies_present:
+        currency_guidance_lines.append(
+            "Other currencies (CNY, CHF, AUD, CAD, etc.): Focus on respective FX pairs and regional markets first."
+        )
+    
+    # If no currency tags or all unknown, use generic guidance
+    if not currency_guidance_lines:
+        currency_guidance_lines.append(
+            "Events lack clear currency tags. Use GENERAL labeling and avoid mentioning USD specifically unless the event explicitly references US data."
+        )
+    
+    currency_guidance = "\n".join(currency_guidance_lines)
+
+    # Build event block with explicit currency/region tags
     event_lines = []
     for evt in sorted_events:
         key = _event_key(evt)
@@ -219,24 +268,30 @@ def _build_brief_prompt(
         f"Macro context:\n---\n{ctx_block}\n---\n\n"
         "Events (ordered by priority, most important first):\n"
         f"{events_block}\n\n"
+        "CURRENCY/REGION REACTION TEMPLATES:\n"
+        f"{currency_guidance}\n\n"
         "Write a concise, actionable daily economic summary for traders.\n\n"
         "Rules:\n"
         "1. Focus ONLY on the top 2-5 most market-moving events.\n"
         "2. Do NOT explain what each indicator is or define terms.\n"
-        "3. For each key event, provide:\n"
-        "   - What outcome would be bullish/bearish for USD, equities, or bonds\n"
-        "   - How to position ahead of the release (e.g., 'watch for vol spike', 'fade initial move', 'breakout setup')\n"
-        "   - Any timing considerations (e.g., 'data drops 30min before market open')\n"
+        "3. For each key event, you MUST:\n"
+        "   a) STATE THE CURRENCY/REGION explicitly in the first reference (e.g., 'EUR CPI', 'US jobs', 'UK GDP')\n"
+        "   b) List PRIMARY impacted products that match the event's currency/region\n"
+        "   c) ONLY mention secondary spillover products if highly relevant, with explicit 'may spill over' language\n"
+        "   d) Provide directional implications: what outcome would be bullish/bearish for the PRIMARY products\n"
+        "   e) Include timing considerations if relevant\n"
+        "   f) Suggest positioning strategies (e.g., 'watch for vol spike', 'fade initial move', 'breakout setup')\n"
         "4. Use conditional phrasing:\n"
-        "   'If CPI comes in hot (>X%), expect...'\n"
-        "   'Dovish tone from Powell would likely...'\n"
-        "   'Miss on jobs could trigger...'\n"
+        "   'If EUR CPI comes in hot (>X%), expect EURUSD to...'\n"
+        "   'Dovish BOJ tone would likely push USDJPY...'\n"
+        "   'Miss on US jobs could trigger...'\n"
         "5. Keep the entire summary under 10 sentences total.\n"
         "6. Ignore low-importance events unless they create confluence with a major release.\n"
         f"7. {dynamics_instruction}\n"
         f"8. {ctx_instruction}\n"
         "9. Never use hyphens. Use commas or parentheses instead.\n"
-        "10. Return ONLY a JSON object with two keys:\n"
+        "10. CRITICAL CONSTRAINT: Never mention USD, DXY, ES, SPX, US10Y, or GC as PRIMARY products unless the event currency is USD or explicitly references US data. These are SECONDARY spillover only for non-USD events.\n"
+        "11. Return ONLY a JSON object with two keys:\n"
         '    "theory_text": "<actionable summary as plain text>"\n'
         '    "dynamics_text": "<positioning advice as plain text, or empty string if dynamics mode is off>"\n'
         "No markdown fences. No commentary outside the JSON."
@@ -371,6 +426,11 @@ def generate_daily_brief_ai(
                     "content": (
                         "You are a professional trader writing actionable market briefs. "
                         "Focus on how to trade the events, not on explaining what they are. "
+                        "CRITICAL: You must correctly attribute macro reactions to the event's currency/region. "
+                        "EUR CPI affects EURUSD and Bunds primarily, not USD. "
+                        "GBP data affects GBPUSD and Gilts primarily, not USD. "
+                        "JPY/BOJ events affect USDJPY and JGBs primarily, not USD. "
+                        "Only US data should focus on USD, DXY, US10Y, ES, SPX as primary products. "
                         "Return only valid JSON as instructed. No markdown. No commentary."
                     ),
                 },

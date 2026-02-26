@@ -1,0 +1,195 @@
+================================================================================
+VOLATILITY OUTLOOK TOOLTIP REMOVAL - COMPLETE
+================================================================================
+Date: 2026-02-26
+Goal: Remove info icon tooltips from Volatility Outlook; keep reference symbol
+
+================================================================================
+CHANGES MADE
+================================================================================
+
+File: twifo.py (lines 5599-5633)
+
+REMOVED:
+  - Icon element: html.Span("ⓘ", ...)
+  - Tooltip attribute: title=bias_definition
+  - Icon styling: cursor, color, fontSize, fontWeight, border, borderRadius, padding
+  - Container wrapper: html.Span with display: inline-flex
+  - Variable: skew_with_tooltip
+
+KEPT:
+  - Asset class label with reference: "FX (DXY)"
+  - Bias label: "↘️ Bearish"
+  - Volatility level badge: "Medium"
+  - Confidence score: "conf 2.0"
+  - Row layout and spacing
+
+================================================================================
+BEFORE
+================================================================================
+
+Code:
+  skew_with_tooltip = html.Span(
+      [
+          html.Span(f"{skew_arrow} {skew}", style={"marginRight": "4px"}),
+          html.Span(
+              "ⓘ",
+              title=bias_definition,
+              style={...}
+          )
+      ],
+      style={"fontSize": "13px", "marginRight": "8px", "display": "inline-flex", ...}
+  )
+  
+  vol_body.append(html.Div([
+      ...,
+      skew_with_tooltip,  # Complex component with icon
+      ...
+  ]))
+
+Rendered:
+  FX (DXY)  |  Medium  |  ↘️ Bearish ⓘ  |  conf 2.0
+                                     ^^^ icon with tooltip
+
+================================================================================
+AFTER
+================================================================================
+
+Code:
+  vol_body.append(html.Div([
+      ...,
+      html.Span(f"{skew_arrow} {skew}", style={"fontSize": "13px", "marginRight": "8px"}),
+      ...
+  ]))
+
+Rendered:
+  FX (DXY)  |  Medium  |  ↘️ Bearish  |  conf 2.0
+  [no icon, no tooltip]
+
+================================================================================
+VERIFICATION - ALL ROW TYPES
+================================================================================
+
+✓ Row with Known Reference:
+    FX (DXY)  |  Medium  |  ↘️ Bearish  |  conf 2.0
+    [no icon, no tooltip]
+
+✓ Row with Null Reference:
+    GENERAL  |  Low  |  ↔️ Neutral  |  conf 1.2
+    [no icon, no tooltip]
+
+✓ Row from Old Rollup:
+    EQUITIES (SPX)  |  High  |  ↗️ Bullish  |  conf 2.8
+    [no icon, no tooltip]
+
+✓ All Asset Classes:
+    - FX (DXY)
+    - EQUITIES (SPX)
+    - RATES (US10Y)
+    - COMMODITIES (CL)
+    - METALS (GC)
+    - CRYPTO (BTC)
+    - VOLATILITY (VIX)
+    - GENERAL (no reference)
+    - CREDIT (no reference)
+
+Result: No icon in any row type
+
+================================================================================
+NO DEAD CODE
+================================================================================
+
+✓ No Dead IDs
+    - Icon used native HTML title attribute (no custom ID)
+    - No ID cleanup needed
+
+✓ No Dead Callbacks
+    - Native HTML tooltip (no hover callback)
+    - No callback cleanup needed
+
+✓ No Dead CSS
+    - Inline styling only (no CSS class)
+    - No CSS cleanup needed
+
+✓ No Dead Imports
+    - Standard html.Span (no special import)
+    - No import cleanup needed
+
+✓ Unused Data Fields (Kept for Compatibility)
+    - bias_definition still in rollup JSON schema
+    - Still read and generated as fallback
+    - Simply not displayed in UI
+
+================================================================================
+SPACING AND ALIGNMENT
+================================================================================
+
+Before: FX (DXY)  |  Medium  |  ↘️ Bearish ⓘ  |  conf 2.0
+After:  FX (DXY)  |  Medium  |  ↘️ Bearish  |  conf 2.0
+
+Spacing Verified:
+  ✓ Asset class label: minWidth 140px
+  ✓ Volatility badge: marginRight 8px
+  ✓ Bias label: marginRight 8px (same as before)
+  ✓ Confidence score: no margin (end of row)
+  ✓ Row alignment: display flex, alignItems center (unchanged)
+
+Result: Clean spacing maintained
+
+================================================================================
+CONFIRMATION
+================================================================================
+
+✓ No Icon Element Remains
+    Confirmed: html.Span("ⓘ", ...) completely removed
+
+✓ No Tooltip ID Remains
+    Confirmed: No element ID used (native title attribute)
+
+✓ No Hover Callback Remains
+    Confirmed: No callback used (native HTML tooltip)
+
+✓ Clean Row Rendering
+    Confirmed: All row types render without icons or tooltips
+
+================================================================================
+FILES MODIFIED
+================================================================================
+
+Modified:
+  - twifo.py (1 location, ~20 lines removed)
+
+Unchanged:
+  - rollups.py (schema still has bias_definition field)
+  - All other files
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+✓ 1. Diff Patch
+   File: volatility_tooltip_only.patch
+   - Shows tooltip removal only
+   - ~20 lines removed
+   - 1 line changed (skew_with_tooltip → simple html.Span)
+
+✓ 2. Confirmation
+   - No icon element remains
+   - No tooltip ID remains
+   - No hover callback remains
+   - All row types verified
+
+✓ 3. Example Final Row
+   // FX (DXY)  |  Medium  |  ↘️ Bearish  |  conf 2.0
+   // [no icon, no tooltip]
+
+================================================================================
+STATUS: ✅ COMPLETE
+================================================================================
+
+Result: Volatility Outlook rows are cleaner and simpler.
+        Reference symbol (e.g., "FX (DXY)") provides sufficient context.
+        No icons, no tooltips, no hover logic anywhere in Volatility Outlook.
+
+================================================================================
+

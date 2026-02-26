@@ -1,0 +1,214 @@
+================================================================================
+VOLATILITY OUTLOOK REFERENCE SYMBOL - IMPLEMENTATION COMPLETE
+================================================================================
+Date: 2026-02-25
+Goal: Make every Volatility Outlook row unambiguous by surfacing reference
+      instruments and defining directional bias
+
+================================================================================
+TASK 1: DATA SOURCE ANALYSIS
+================================================================================
+
+✓ DETERMINISTIC - Computed from structured article fields
+✓ Source: article.volatility_impact.{expected_volatility, directional_skew}
+✓ Aggregation: Average scores, mode for skew, grouped by asset class
+✓ Current schema: expected_volatility, directional_skew, confidence_score, sources
+✓ Missing: reference_symbol (which instrument the bias refers to)
+
+Problem Identified:
+  "FX · Medium · Downside" is ambiguous
+  - Could mean DXY downside (USD weakness, EURUSD up)
+  - Or EURUSD downside (USD strength, DXY up)
+  - These are opposite directions!
+
+================================================================================
+TASK 2: CANONICAL REFERENCE MAPPING
+================================================================================
+
+Defined in rollups.py (_aggregate_volatility_by_asset_class):
+
+  EQUITIES  → SPX      (S&P 500 index)
+  FX        → DXY      (US Dollar Index)
+  RATES     → US10Y    (10-Year Treasury Yield)
+  COMMODITIES → CL     (Crude Oil - most liquid)
+  METALS    → GC       (Gold)
+  ENERGY    → CL       (Crude Oil)
+  CRYPTO    → BTC      (Bitcoin)
+  VOLATILITY → VIX     (VIX Index)
+  GENERAL   → None     (Too broad for single instrument)
+  CREDIT    → None     (Too broad for single instrument)
+
+FX Reference Choice: DXY
+  Rationale:
+    - Most common vol surface anchor in macro research
+    - Represents basket of major currencies (EUR, JPY, GBP, CAD, SEK, CHF)
+    - Inverse relationship with EURUSD is well-understood
+    - Deterministic source allows confident canonical assignment
+
+================================================================================
+TASK 3: ROLLUP JSON SCHEMA EXTENSION
+================================================================================
+
+Extended volatility_by_asset_class rows with:
+
+  reference_symbol: string | null
+    - Canonical instrument for the asset class
+    - Example: "DXY", "SPX", "US10Y"
+    - null for GENERAL/CREDIT (too broad)
+
+  bias_definition: string
+    - Tooltip text explaining what the bias means
+    - Special handling for FX inverse relationship
+    - Example: "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+
+Backward Compatibility:
+  ✓ Old rollups without new fields work correctly
+  ✓ UI falls back to canonical mapping
+  ✓ No crashes, no empty labels
+  ✓ No regeneration required
+
+================================================================================
+TASK 4: UI RENDERER UPDATES
+================================================================================
+
+Changes to twifo.py (render_rollup_summary):
+
+Row Label:
+  Before: FX
+  After:  FX (DXY)
+  If reference_symbol is null: show asset class name only
+
+Bias Label:
+  Before: ↘️ Bearish
+  After:  ↘️ Bearish ⓘ
+  Added tooltip icon with hover text
+
+Tooltip Text:
+  Deterministic with reference (e.g., DXY):
+    "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+
+  No reference (e.g., GENERAL):
+    "Bearish bias for GENERAL. No single reference instrument."
+
+  Old rollup (missing field):
+    Falls back to canonical mapping silently
+    Generates tooltip using fallback reference
+
+================================================================================
+TASK 5: LLM-DERIVED GUARD
+================================================================================
+
+✓ NOT NEEDED - Volatility outlook is fully deterministic
+✓ Computed from structured article fields, not LLM-summarized
+✓ No narrative sources involved
+✓ Hard directional labels (Bearish/Bullish/Neutral) are appropriate
+
+================================================================================
+TASK 6: TESTS
+================================================================================
+
+File: test_volatility_outlook_reference.py
+
+Test Results: 5/5 PASSED
+
+  ✓ Test 1: Reference Mapping
+    - Canonical mapping defined correctly
+    - Bias definition builder works for all cases
+
+  ✓ Test 2: Aggregation with Reference
+    - New fields added to rollup JSON
+    - reference_symbol = "DXY" for FX
+    - bias_definition mentions DXY
+
+  ✓ Test 3: UI Rendering
+    - FX (DXY) label renders correctly
+    - EQUITIES (SPX) label renders correctly
+    - Tooltip icon (ⓘ) present
+    - Bias definition in tooltip
+
+  ✓ Test 4: Backward Compatibility
+    - Old rollups without reference_symbol work
+    - Fallback mapping applied silently
+    - No crashes or errors
+
+  ✓ Test 5: GENERAL Asset Class
+    - No reference shown (correct)
+    - No parenthetical in label
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+✓ 1. Diff Patch
+   File: volatility_outlook_reference.patch
+   - rollups.py: Schema extension, bias definition builder
+   - twifo.py: UI rendering with reference and tooltips
+   - ~120 lines added across 2 files
+
+✓ 2. FX Reference Explanation
+   Chosen: DXY (US Dollar Index)
+   Reason: Most common vol surface anchor in macro research
+   Special: Tooltip explains DXY ↔ EURUSD inverse relationship
+
+✓ 3. Example Rendered Output
+   FX (DXY)  |  Medium  |  ↘️ Bearish ⓘ
+   Tooltip: "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+
+✓ 4. JSON Schema Before/After
+   Before: {expected_volatility, directional_skew, confidence_score, sources}
+   After:  Added reference_symbol and bias_definition
+
+✓ 5. Regeneration Requirement
+   ✅ NO REGENERATION REQUIRED
+   - Old rollups work with fallback mapping
+   - Backward compatible
+   - Graceful degradation
+
+================================================================================
+EXAMPLE RENDERED ROWS
+================================================================================
+
+FX (DXY)  |  Medium  |  ↘️ Bearish ⓘ
+  Tooltip: "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+
+EQUITIES (SPX)  |  High  |  ↗️ Bullish ⓘ
+  Tooltip: "Bullish bias relative to SPX. Expected upside movement."
+
+RATES (US10Y)  |  Low  |  ↔️ Neutral ⓘ
+  Tooltip: "Neutral bias relative to US10Y. Expected neutral movement."
+
+GENERAL  |  Medium  |  ↘️ Bearish ⓘ
+  Tooltip: "Bearish bias for GENERAL. No single reference instrument."
+
+================================================================================
+FILES MODIFIED/CREATED
+================================================================================
+
+Modified:
+  - rollups.py (schema extension, bias definition builder)
+  - twifo.py (UI rendering with reference and tooltips)
+
+Created:
+  - test_volatility_outlook_reference.py (comprehensive tests)
+  - volatility_outlook_reference.patch (diff)
+  - VOLATILITY_OUTLOOK_ANALYSIS.md (data source analysis)
+  - VOLATILITY_OUTLOOK_DELIVERABLES.md (full documentation)
+  - VOLATILITY_OUTLOOK_SUMMARY.txt (this file)
+
+================================================================================
+STATUS: ✅ COMPLETE - ALL TASKS FULFILLED
+================================================================================
+
+✓ Task 1: Data source traced (deterministic, not LLM)
+✓ Task 2: Canonical reference mapping defined
+✓ Task 3: JSON schema extended (backward compatible)
+✓ Task 4: UI renderer updated (reference + tooltips)
+✓ Task 5: LLM guard not needed (fully deterministic)
+✓ Task 6: Tests created and passing (5/5)
+
+Result: Every Volatility Outlook row is now unambiguous with clear reference
+        instruments and bias definitions. Users understand exactly what the
+        directional bias means and which instrument it refers to.
+
+================================================================================
+

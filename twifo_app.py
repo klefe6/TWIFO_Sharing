@@ -27,6 +27,7 @@ PREFIX_MAP = {
     "BR_":    "BlackRock",
     "DB_":    "Deutsche Bank",
     "GM_":    "Goldman Sachs",
+    "GS_":    "Goldman Sachs",  # Alternative prefix for Goldman Sachs
     "HT_":    "HighTower Research",
     "JPM_":   "JP Morgan",
     "MZ_":    "Mizuho",

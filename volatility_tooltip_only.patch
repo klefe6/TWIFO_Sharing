@@ -1,0 +1,44 @@
+--- a/TWIFO_Sharing/twifo.py
++++ b/TWIFO_Sharing/twifo.py
+@@ -5594,26 +5594,6 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode:
+             skew_arrow = "↗️" if skew == "Bullish" else ("↘️" if skew == "Bearish" else "↔️")
+             
+             # Build asset class label with reference symbol
+             ac_label = f"{ac} ({reference_symbol})" if reference_symbol else ac
+             
+-            # Build skew label with tooltip icon
+-            skew_with_tooltip = html.Span(
+-                [
+-                    html.Span(f"{skew_arrow} {skew}", style={"marginRight": "4px"}),
+-                    html.Span(
+-                        "ⓘ",
+-                        title=bias_definition,
+-                        style={
+-                            "cursor": "help",
+-                            "color": "#007bff",
+-                            "fontSize": "12px",
+-                            "fontWeight": "bold",
+-                            "border": "1px solid #007bff",
+-                            "borderRadius": "50%",
+-                            "padding": "0 4px",
+-                            "display": "inline-block",
+-                            "lineHeight": "1.2",
+-                        }
+-                    )
+-                ],
+-                style={"fontSize": "13px", "marginRight": "8px", "display": "inline-flex", "alignItems": "center"}
+-            )
+-            
+             vol_body.append(html.Div(
+                 [
+                     html.Span(ac_label, style={"fontWeight": "600", "minWidth": "140px", "display": "inline-block", "fontSize": "13px"}),
+@@ -5625,7 +5605,7 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode:
+                             "backgroundColor": ev_color, "color": "white",
+                         }
+                     ),
+-                    skew_with_tooltip,
++                    html.Span(f"{skew_arrow} {skew}", style={"fontSize": "13px", "marginRight": "8px"}),
+                     html.Span(f"conf {conf:.1f}", style={"fontSize": "11px", "color": "#999"}),
+                 ],
+                 style={"marginBottom": "8px", "display": "flex", "alignItems": "center", "flexWrap": "wrap"},
+

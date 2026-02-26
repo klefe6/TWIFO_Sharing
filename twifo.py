@@ -81,6 +81,7 @@ PREFIX_MAP = {
     "BR_":    "BlackRock",
     "DB_":    "Deutsche Bank",
     "GM_":    "Goldman Sachs",
+    "GS_":    "Goldman Sachs",  # Alternative prefix for Goldman Sachs
     "HT_":    "HighTower Research",
     "JPM_":   "JP Morgan",
     "MZ_":    "Mizuho",
@@ -295,6 +296,7 @@ APP_TITLE = "H&C Internal Research Directory"
 FILES_DIR = os.path.normpath(
     r"C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE"
 )
+ORIGINALS_ROOT = Path(FILES_DIR) / "originals"  # Shared originals folder for all PDFs
 
 # Initialize path manager for new file layout
 if PATH_MANAGER_AVAILABLE:
@@ -4846,94 +4848,155 @@ def _build_tagged_bullet_list(
 
 def _build_risk_flags_card(warnings: list, card_id: str = "risk-flags") -> html.Div:
     """
-    Compact Risk Flags card: one chip per warning, tapping expands full text inline.
-    A 'Show all' link below reveals remaining chips when > 5 warnings.
+    Risk Flags card: each item shows asset class, products, horizon, direction, and text.
+    Includes backward compatibility for old-format warnings (plain text or missing fields).
     """
     if not warnings:
         return html.Div()
 
-    PREVIEW_COUNT = 5
-    chip_items: list = []
+    def _normalize_warning(w):
+        """Backward compatibility adapter: convert old format to new format."""
+        if isinstance(w, str):
+            # Old format: plain string
+            return {
+                "text": w,
+                "asset_class": "general",
+                "products": [],
+                "horizon": "today",
+                "direction": "unknown",
+                "confidence": None,
+                "sources": []
+            }
+        elif isinstance(w, dict):
+            # Ensure all required fields exist (backward compatibility)
+            return {
+                "text": w.get("text", str(w)),
+                "asset_class": w.get("asset_class", "general"),
+                "products": w.get("products", []),
+                "horizon": w.get("horizon", "today"),
+                "direction": w.get("direction", "unknown"),
+                "confidence": w.get("confidence"),
+                "sources": w.get("sources", [])
+            }
+        else:
+            # Fallback for unexpected format
+            return {
+                "text": str(w),
+                "asset_class": "general",
+                "products": [],
+                "horizon": "today",
+                "direction": "unknown",
+                "confidence": None,
+                "sources": []
+            }
 
-    for i, w in enumerate(warnings):
-        text = w.get("text", str(w)) if isinstance(w, dict) else str(w)
-        # Derive a short chip label: first ~40 chars or up to first comma/period
-        short = text.split(".")[0].split(",")[0].strip()
-        if len(short) > 42:
-            short = short[:40] + "…"
-
-        chip_detail_id = f"{card_id}-chip-detail-{i}"
-        chip_toggle_id = f"{card_id}-chip-toggle-{i}"
-
-        chip_items.append(html.Div(
+    bullet_rows: list = []
+    for w in warnings:
+        norm = _normalize_warning(w)
+        text = norm["text"]
+        asset_class = norm["asset_class"].upper()
+        products = norm["products"]
+        horizon = norm["horizon"]
+        direction = norm["direction"]
+        
+        # Build context tags row
+        context_tags: list = []
+        
+        # Primary tag: asset class
+        ac_colors = _TAG_COLORS.get(asset_class, _TAG_COLORS["GENERAL"])
+        context_tags.append(html.Span(
+            asset_class,
+            style={
+                "display": "inline-block",
+                "padding": "2px 7px",
+                "borderRadius": "3px",
+                "fontSize": "10px",
+                "fontWeight": "700",
+                "backgroundColor": ac_colors["bg"],
+                "color": ac_colors["fg"],
+                "marginRight": "5px",
+                "letterSpacing": "0.03em",
+            }
+        ))
+        
+        # Secondary tag: products or "General"
+        if products:
+            products_text = ", ".join(products[:3])  # Show first 3
+            if len(products) > 3:
+                products_text += f" +{len(products) - 3}"
+            context_tags.append(html.Span(
+                products_text,
+                style={
+                    "display": "inline-block",
+                    "padding": "2px 7px",
+                    "borderRadius": "3px",
+                    "fontSize": "10px",
+                    "fontWeight": "600",
+                    "backgroundColor": "#e9ecef",
+                    "color": "#495057",
+                    "marginRight": "5px",
+                }
+            ))
+        else:
+            context_tags.append(html.Span(
+                "General",
+                style={
+                    "display": "inline-block",
+                    "padding": "2px 7px",
+                    "borderRadius": "3px",
+                    "fontSize": "10px",
+                    "fontWeight": "600",
+                    "backgroundColor": "#f8f9fa",
+                    "color": "#6c757d",
+                    "marginRight": "5px",
+                    "fontStyle": "italic",
+                }
+            ))
+        
+        # Horizon and direction suffix
+        suffix_parts = []
+        if horizon and horizon != "today":
+            suffix_parts.append(horizon)
+        if direction and direction not in ["unknown", "mixed"]:
+            suffix_parts.append(direction)
+        elif direction == "mixed":
+            suffix_parts.append("two-sided")
+        
+        if suffix_parts:
+            context_tags.append(html.Span(
+                " | ".join(suffix_parts),
+                style={
+                    "fontSize": "10px",
+                    "color": "#999",
+                    "fontStyle": "italic",
+                    "marginLeft": "3px",
+                }
+            ))
+        
+        # Build the row
+        bullet_rows.append(html.Div(
             [
-                # The chip itself acts as toggle
-                html.Span(
-                    short,
-                    id=chip_toggle_id,
-                    n_clicks=0,
-                    style={
-                        "display": "inline-block",
-                        "padding": "3px 10px",
-                        "borderRadius": "12px",
-                        "fontSize": "12px",
-                        "fontWeight": "500",
-                        "backgroundColor": "#fff3cd",
-                        "color": "#856404",
-                        "border": "1px solid #ffc107",
-                        "cursor": "pointer",
-                        "marginRight": "6px",
-                        "marginBottom": "4px",
-                    }
-                ),
-                # Expanded detail (hidden by default)
+                # Context tags row
                 html.Div(
-                    text,
-                    id=chip_detail_id,
-                    style={
-                        "display": "none",
-                        "fontSize": "13px",
-                        "color": "#495057",
-                        "backgroundColor": "#fffbea",
-                        "border": "1px solid #ffc107",
-                        "borderRadius": "4px",
-                        "padding": "6px 10px",
-                        "marginTop": "4px",
-                        "marginBottom": "6px",
-                        "lineHeight": "1.45",
-                    }
+                    context_tags,
+                    style={"marginBottom": "3px", "display": "flex", "alignItems": "center", "flexWrap": "wrap"}
+                ),
+                # Warning text
+                html.Div(
+                    [
+                        html.Span("⚠", style={"color": "#856404", "marginRight": "7px", "fontSize": "13px"}),
+                        html.Span(text, style={"fontSize": "13px", "lineHeight": "1.5", "color": "#495057"}),
+                    ],
+                    style={"display": "flex", "alignItems": "flex-start"},
                 ),
             ],
-            style={"display": "inline-block", "verticalAlign": "top", "marginBottom": "2px"}
-            if i < PREVIEW_COUNT else {"display": "none"},
-            id=f"{card_id}-chip-wrapper-{i}",
-        ))
-
-    overflow_id = f"{card_id}-overflow"
-    showall_id = f"{card_id}-showall"
-
-    body_children: list = [
-        html.Div(chip_items, style={"marginBottom": "6px"}),
-    ]
-
-    if len(warnings) > PREVIEW_COUNT:
-        # Hidden overflow wrappers (indices >= PREVIEW_COUNT) — already hidden above;
-        # the Show-all link reveals them by toggling their parent wrappers.
-        body_children.append(html.Div(
-            html.A(
-                f"Show all {len(warnings)} risk flags →",
-                id=showall_id,
-                href="#",
-                style={"fontSize": "12px", "color": "#856404", "textDecoration": "none"},
-                n_clicks=0,
-            ),
-            style={"marginTop": "4px"},
+            style={"marginBottom": "12px"},
         ))
 
     return _build_card(
         card_id=card_id,
         title="Risk Flags",
-        body_children=body_children,
+        body_children=bullet_rows,
         default_collapsed=True,
         title_icon="⚠️",
     )
@@ -5383,7 +5446,7 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
 
     Section order (matches spec):
       1. Briefing Strip  (sticky desktop / inline mobile)
-      2. Today in 3 Bullets  (TLDR — default expanded)
+      2. Today in Bullets  (TLDR — default expanded)
       3. Catalysts & Calendar  (consensus_catalysts + econ events — default expanded)
       4. Volatility Outlook  (default collapsed)
       5. Risk Flags  (warnings chips — default collapsed)
@@ -5451,7 +5514,7 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
         style={"padding": "14px 16px 0 16px"},
     )
 
-    # ── 2. Today in 3 Bullets (TLDR) ─────────────────────────────────────
+    # ── 2. Today in Bullets (TLDR) ─────────────────────────────────────
     tldr = sections.get("tldr", [])
     tldr_body: list = []
     if tldr:
@@ -5493,7 +5556,7 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
 
     card_today = _build_card(
         card_id="card-today",
-        title="Today in 3 Bullets",
+        title="Today in Bullets",
         body_children=tldr_body,
         default_collapsed=False,
         title_icon="📝",
@@ -5763,9 +5826,15 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
         card_articles = None  # hidden when no ideas
 
     # ── Layout assembly ───────────────────────────────────────────────────
-    # Left column (actionable today): cards 2, 3, 4
+    # Left column (actionable today): cards 2, 3, 4, 8
+    # card_articles (Macro Trade Ideas) goes directly under Volatility Outlook,
+    # inside the left column — it must NOT span both columns.
+    left_col_children = [card_today, card_catalysts, card_vol]
+    if card_articles is not None:
+        left_col_children.append(card_articles)
+
     left_col = html.Div(
-        [card_today, card_catalysts, card_vol],
+        left_col_children,
         style={"flex": "1", "minWidth": "0"},
     )
     # Right column (context): cards 5, 6, 7
@@ -5809,8 +5878,6 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
                 [
                     page_header,
                     two_col,
-                    # card_articles is None when there are no macro trade ideas; skip rendering.
-                    *([html.Div(card_articles, style={"marginTop": "0"})] if card_articles is not None else []),
                 ],
                 style={"padding": "0 16px 20px 16px"},
             ),
@@ -5836,6 +5903,219 @@ def render_rollup_sections_detail(sections: dict, date_str: str = "", rollup_jso
         children.extend(_build_tagged_bullet_list(forward_watch, card_id="legacy-fw"))
 
     return html.Div(children)
+
+
+# ── Daily View Split-Screen Helpers ──────────────────────────────────────────
+
+
+def resolve_original_pdf(artifact_folder: str) -> Optional[str]:
+    """
+    Resolve the original PDF file for an article using priority-based search.
+    
+    Priority:
+      A. Check artifact folder for original PDF
+      B. Check ORIGINALS_ROOT using deterministic filename mapping
+      C. Return None if not found (caller can show fallback)
+    
+    Args:
+        artifact_folder: Artifact folder name (e.g., "20260211__GM__title__hash")
+    
+    Returns:
+        Relative path to original PDF (e.g., "artifacts/folder/original.pdf" or "originals/file.pdf"), or None
+    """
+    try:
+        artifacts_base = Path(FILES_DIR) / "artifacts"
+        art_dir = artifacts_base / artifact_folder
+        
+        # Priority A: Check artifact folder for original PDF
+        if art_dir.exists():
+            # Try common original PDF names
+            for pdf_name in ["original.pdf", "source.pdf", "article.pdf"]:
+                pdf_path = art_dir / pdf_name
+                if pdf_path.is_file():
+                    print(f"[ORIGINAL_PDF] id={artifact_folder} tried=artifact/{pdf_name} found=yes")
+                    return f"artifacts/{artifact_folder}/{pdf_name}"
+            
+            # Try finding any PDF that's not sum.pdf
+            for pdf_file in art_dir.glob("*.pdf"):
+                if pdf_file.name != "sum.pdf":
+                    print(f"[ORIGINAL_PDF] id={artifact_folder} tried=artifact/{pdf_file.name} found=yes")
+                    return f"artifacts/{artifact_folder}/{pdf_file.name}"
+        
+        # Priority B: Check ORIGINALS_ROOT using deterministic filename
+        # Artifact folder format: YYYYMMDD__PROVIDER__title_slug__hash
+        # Original PDF should have same basename: YYYYMMDD__PROVIDER__title_slug__hash.pdf
+        original_filename = f"{artifact_folder}.pdf"
+        original_path = ORIGINALS_ROOT / original_filename
+        
+        if original_path.is_file():
+            print(f"[ORIGINAL_PDF] id={artifact_folder} tried=artifact found=no tried=originals/{original_filename} found=yes")
+            return f"originals/{original_filename}"
+        
+        # Not found in either location
+        print(f"[ORIGINAL_PDF] id={artifact_folder} tried=artifact found=no tried=originals/{original_filename} found=no")
+        return None
+        
+    except Exception as e:
+        print(f"[ERROR] resolve_original_pdf failed for {artifact_folder}: {e}")
+        return None
+
+
+def _render_original_article_pane(artifact_folder: str, original_pdf_path: Optional[str]) -> html.Div:
+    """
+    Render the right pane showing the original article.
+    
+    Strategy:
+      1. If original_pdf_path exists → embed PDF in iframe
+      2. Else → show message "Original not available" with fallback
+    """
+    if original_pdf_path:
+        return html.Div([
+            html.Div([
+                html.H4(
+                    "Original Article",
+                    style={
+                        "margin": "0 0 10px 0",
+                        "fontSize": "16px",
+                        "color": HEADER_BG_COLOR,
+                        "fontWeight": "600"
+                    }
+                ),
+                html.A(
+                    "↗ Open in New Tab",
+                    href=f"/view?file={original_pdf_path}",
+                    target="_blank",
+                    style={
+                        "fontSize": "12px",
+                        "color": "#007bff",
+                        "textDecoration": "none",
+                        "marginLeft": "10px"
+                    }
+                )
+            ], style={
+                "display": "flex",
+                "alignItems": "center",
+                "justifyContent": "space-between",
+                "marginBottom": "8px",
+                "paddingBottom": "8px",
+                "borderBottom": "1px solid #dee2e6"
+            }),
+            html.Iframe(
+                src=f"/view?file={original_pdf_path}",
+                style={
+                    "width": "100%",
+                    "height": "75vh",
+                    "display": "block",
+                    "border": "1px solid #ddd",
+                    "borderRadius": "4px"
+                }
+            )
+        ], style={
+            "height": "100%",
+            "padding": "10px",
+            "backgroundColor": "#f8f9fa"
+        })
+    else:
+        return html.Div([
+            html.Div([
+                html.H4(
+                    "Original Article",
+                    style={
+                        "margin": "0 0 10px 0",
+                        "fontSize": "16px",
+                        "color": HEADER_BG_COLOR,
+                        "fontWeight": "600"
+                    }
+                )
+            ], style={
+                "marginBottom": "15px",
+                "paddingBottom": "8px",
+                "borderBottom": "1px solid #dee2e6"
+            }),
+            html.Div([
+                html.P(
+                    "📄 Original article not available",
+                    style={
+                        "fontSize": "14px",
+                        "color": "#6c757d",
+                        "marginBottom": "10px",
+                        "fontStyle": "italic"
+                    }
+                ),
+                html.P(
+                    "The original PDF was not found in the artifact folder. Only the AI-generated summary is available.",
+                    style={
+                        "fontSize": "13px",
+                        "color": "#999",
+                        "lineHeight": "1.5"
+                    }
+                )
+            ], style={
+                "backgroundColor": "#fff3cd",
+                "padding": "15px",
+                "borderRadius": "4px",
+                "border": "1px solid #ffc107"
+            })
+        ], style={
+            "height": "100%",
+            "padding": "10px",
+            "backgroundColor": "#f8f9fa"
+        })
+
+
+def _build_split_screen_layout(summary_content: html.Div, artifact_folder: str) -> html.Div:
+    """
+    Wrap summary content in a split-screen layout with original article on the right.
+    
+    Layout:
+      - Desktop: Left 45%, Right 55% (flex)
+      - Mobile: Stacked vertically (media query handled by flex-wrap)
+    
+    Args:
+        summary_content: The existing summary view content (left pane)
+        artifact_folder: The artifact folder name to find original PDF
+    
+    Returns:
+        Split-screen container with summary on left, original on right
+    """
+    # Resolve original PDF (checks artifact folder, then ORIGINALS_ROOT)
+    original_pdf_path = resolve_original_pdf(artifact_folder)
+    
+    # Build right pane
+    right_pane = _render_original_article_pane(artifact_folder, original_pdf_path)
+    
+    # Build split-screen container
+    return html.Div([
+        # Left pane: summary
+        html.Div(
+            summary_content,
+            style={
+                "flex": "1",
+                "minWidth": "0",
+                "height": "calc(100vh - 200px)",
+                "overflowY": "auto",
+                "paddingRight": "10px",
+                "borderRight": "1px solid #dee2e6"
+            }
+        ),
+        # Right pane: original
+        html.Div(
+            right_pane,
+            style={
+                "flex": "1",
+                "minWidth": "0",
+                "height": "calc(100vh - 200px)",
+                "overflowY": "auto",
+                "paddingLeft": "10px"
+            }
+        )
+    ], style={
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": "16px",
+        "width": "100%",
+        "padding": "10px"
+    })
 
 
 @app.callback(
@@ -6106,7 +6386,9 @@ def display_daily_article_summary(n_clicks_list, artifacts, login_user_store, da
                 html.Code(art["sum_json_path"], style={"fontSize": "12px"})
             ], style={"padding": "20px"})
 
-        return art["artifact_folder"], content
+        # Wrap in split-screen layout for Daily View articles
+        split_view = _build_split_screen_layout(content, art["artifact_folder"])
+        return art["artifact_folder"], split_view
 
     # --- Strategy 2: embed sum.pdf in iframe ---
     if art["has_sum_pdf"]:
@@ -6142,7 +6424,9 @@ def display_daily_article_summary(n_clicks_list, artifacts, login_user_store, da
             )
         ], style={"padding": "10px"})
 
-        return art["artifact_folder"], content
+        # Wrap in split-screen layout for Daily View articles
+        split_view = _build_split_screen_layout(content, art["artifact_folder"])
+        return art["artifact_folder"], split_view
 
     # --- Strategy 3: nothing available ---
     artifacts_base = (
@@ -6195,7 +6479,9 @@ def display_daily_article_summary(n_clicks_list, artifacts, login_user_store, da
         })
     ], style={"padding": "20px"})
 
-    return art["artifact_folder"], content
+    # Wrap in split-screen layout for Daily View articles
+    split_view = _build_split_screen_layout(content, art["artifact_folder"])
+    return art["artifact_folder"], split_view
 
 
 ############################
@@ -6317,58 +6603,6 @@ app.clientside_callback(
     prevent_initial_call=True,
 )
 
-# ── Risk-flag chip expansion (clientside — pattern match over all chips) ───────
-# We register a single document-level delegated click handler via a one-time
-# clientside callback that fires when the daily-view-content updates.
-app.clientside_callback(
-    """
-    function(children) {
-        // Delegate clicks on any risk-flags chip toggle
-        // (registered once; safe to re-register because handler checks dataset flag)
-        if (window._riskChipHandlerAttached) return window.dash_clientside.no_update;
-        document.addEventListener('click', function(e) {
-            var el = e.target;
-            if (!el || !el.id) return;
-            var m = el.id.match(/^risk-flags-chip-toggle-(\\d+)$/);
-            if (!m) return;
-            e.preventDefault();
-            var idx = m[1];
-            var detail = document.getElementById('risk-flags-chip-detail-' + idx);
-            if (!detail) return;
-            var hidden = (detail.style.display === 'none');
-            detail.style.display = hidden ? 'block' : 'none';
-            el.style.backgroundColor = hidden ? '#fff0b3' : '#fff3cd';
-        });
-        window._riskChipHandlerAttached = true;
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output("daily-view-content", "data-chips"),
-    Input("daily-view-content", "children"),
-    prevent_initial_call=True,
-)
-
-# ── Risk-flags Show-all (clientside) ─────────────────────────────────────────
-app.clientside_callback(
-    """
-    function(n) {
-        // Show all chip wrappers that were hidden (index >= 5)
-        var i = 5;
-        while (true) {
-            var wrapper = document.getElementById('risk-flags-chip-wrapper-' + i);
-            if (!wrapper) break;
-            wrapper.style.display = 'inline-block';
-            i++;
-        }
-        var link = document.getElementById('risk-flags-showall');
-        if (link) link.style.display = 'none';
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output("daily-view-content", "data-riskall"),
-    Input("risk-flags-showall", "n_clicks"),
-    prevent_initial_call=True,
-)
 
 # ── Tagged-list Show-all links (clientside — delegated) ──────────────────────
 app.clientside_callback(

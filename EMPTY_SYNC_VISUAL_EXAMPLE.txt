@@ -1,0 +1,137 @@
+================================================================================
+DAILY VIEW EMPTY STATE SYNCHRONIZATION - VISUAL EXAMPLE
+================================================================================
+
+SCENARIO: User changes date from one with articles to one without articles
+
+================================================================================
+BEFORE FIX (BROKEN BEHAVIOR)
+================================================================================
+
+User is viewing date: 2026-02-24 (has articles)
+Right panel shows: Full daily recap with briefing, TLDR, volatility, etc.
+
+User changes date to: 2026-12-31 (no articles)
+
++---------------------------+  +----------------------------------------+
+|  LEFT PANEL               |  |  RIGHT PANEL                           |
+|  (Updates correctly)      |  |  (BROKEN - Shows stale content)        |
++---------------------------+  +----------------------------------------+
+|                           |  |                                        |
+|  No articles found for    |  |  [Briefing Strip from 2026-02-24]     |
+|  December 31, 2026.       |  |                                        |
+|                           |  |  Preparation for February 24, 2026     |
+|                           |  |                                        |
+|                           |  |  TLDR                                  |
+|                           |  |  - Old bullet point 1                  |
+|                           |  |  - Old bullet point 2                  |
+|                           |  |                                        |
+|                           |  |  Volatility Outlook                    |
+|                           |  |  FX (DXY) | Medium | Bearish           |
+|                           |  |                                        |
+|                           |  |  [More stale cards from 2026-02-24]   |
+|                           |  |                                        |
++---------------------------+  +----------------------------------------+
+
+PROBLEM: Left panel says "no articles" but right panel shows old recap!
+         User is confused - which date am I looking at?
+
+================================================================================
+AFTER FIX (CORRECT BEHAVIOR)
+================================================================================
+
+User is viewing date: 2026-02-24 (has articles)
+Right panel shows: Full daily recap with briefing, TLDR, volatility, etc.
+
+User changes date to: 2026-12-31 (no articles)
+
++---------------------------+  +----------------------------------------+
+|  LEFT PANEL               |  |  RIGHT PANEL                           |
+|  (Updates correctly)      |  |  (FIXED - Clears immediately)          |
++---------------------------+  +----------------------------------------+
+|                           |  |                                        |
+|  No articles found for    |  |                                        |
+|  December 31, 2026.       |  |                                        |
+|                           |  |    +----------------------------+      |
+|                           |  |    |                            |      |
+|                           |  |    |  No Articles Found         |      |
+|                           |  |    |                            |      |
+|                           |  |    |  No articles found for     |      |
+|                           |  |    |  December 31, 2026.        |      |
+|                           |  |    |                            |      |
+|                           |  |    |  Select a different date   |      |
+|                           |  |    |  or check if articles have |      |
+|                           |  |    |  been ingested.            |      |
+|                           |  |    |                            |      |
+|                           |  |    +----------------------------+      |
+|                           |  |                                        |
+|                           |  |                                        |
++---------------------------+  +----------------------------------------+
+
+RESULT: Both panels show consistent empty state with the SAME date!
+        User clearly understands there are no articles for this date.
+
+================================================================================
+KEY IMPROVEMENTS
+================================================================================
+
+1. SYNCHRONIZATION
+   - Both panels update simultaneously when date changes
+   - No stale content ever visible
+
+2. CONSISTENCY
+   - Both panels show the same date: "December 31, 2026"
+   - Both panels use the same format: "%B %d, %Y"
+
+3. CLARITY
+   - Empty state is obvious and centered
+   - Helpful message guides user to select different date
+   - No confusion about which date is being viewed
+
+4. PERFORMANCE
+   - Right panel clears immediately (no delay)
+   - No unnecessary rendering when artifacts exist
+   - Early return prevents wasted computation
+
+================================================================================
+TECHNICAL FLOW
+================================================================================
+
+User changes date input -> Click "OK" button
+    |
+    v
+populate_daily_view_sidebar callback fires
+    |
+    +-> Loads artifacts for new date
+    +-> Updates daily-articles-store to [] (empty)
+    +-> Updates left panel to show "No articles found"
+    |
+    v
+display_daily_article_summary callback fires (NEW BEHAVIOR)
+    |
+    +-> Triggered by: daily-articles-store update (not button click)
+    +-> Checks: artifacts is empty
+    +-> Action: Clear right panel with empty state
+    +-> Shows: "No Articles Found" with correct date
+    |
+    v
+RESULT: Both panels synchronized and showing empty state
+
+================================================================================
+BACKWARD COMPATIBILITY
+================================================================================
+
+Existing behavior PRESERVED:
+
+1. When user clicks article button -> Renders article (unchanged)
+2. When user clicks summary button -> Renders recap (unchanged)
+3. When rollup doesn't exist -> Shows helpful message (unchanged)
+4. When PDF exists -> Embeds PDF (unchanged)
+5. Economic Events panel -> Still renders independently (unchanged)
+
+New behavior ADDED:
+
+6. When date changes to empty -> Clears right panel immediately (NEW)
+
+================================================================================
+

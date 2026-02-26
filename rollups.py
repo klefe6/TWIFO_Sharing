@@ -152,6 +152,44 @@ def write_txt(p: Path, text: str) -> None:
 def _format_date_human(d: dt.date) -> str:
     return d.strftime("%B %d, %Y")
 
+def _next_trading_weekday(d: dt.date) -> dt.date:
+    """
+    Compute the next trading weekday after the given date.
+    
+    Rules:
+    - Friday → Monday (skip weekend)
+    - Saturday → Monday
+    - Sunday → Monday
+    - Monday-Thursday → next day
+    
+    Args:
+        d: The article date
+        
+    Returns:
+        The next trading weekday
+        
+    Examples:
+        >>> _next_trading_weekday(dt.date(2026, 2, 27))  # Friday
+        datetime.date(2026, 3, 2)  # Monday
+        >>> _next_trading_weekday(dt.date(2026, 2, 28))  # Saturday
+        datetime.date(2026, 3, 2)  # Monday
+        >>> _next_trading_weekday(dt.date(2026, 3, 1))   # Sunday
+        datetime.date(2026, 3, 2)  # Monday
+        >>> _next_trading_weekday(dt.date(2026, 3, 2))   # Monday
+        datetime.date(2026, 3, 3)  # Tuesday
+        >>> _next_trading_weekday(dt.date(2026, 3, 3))   # Tuesday
+        datetime.date(2026, 3, 4)  # Wednesday
+    """
+    next_day = d + dt.timedelta(days=1)
+    # weekday(): Monday=0, Sunday=6
+    # If next_day is Saturday (5) or Sunday (6), jump to Monday
+    if next_day.weekday() == 5:  # Saturday
+        return next_day + dt.timedelta(days=2)
+    elif next_day.weekday() == 6:  # Sunday
+        return next_day + dt.timedelta(days=1)
+    else:
+        return next_day
+
 def _pill(text: str, typ: str = "tag") -> dict:
     return {"text": text, "type": typ}
 
@@ -561,6 +599,119 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
     providers = sorted({a.get("meta", {}).get("provider", "O") for a in article_sum_jsons})
     products = sorted({p for a in article_sum_jsons for p in (a.get("meta", {}).get("products") or [])})
 
+    def _infer_risk_flag_context(text: str, products: List[str]) -> dict:
+        """
+        Infer asset_class, horizon, direction, and confidence for a risk flag.
+        
+        Returns dict with:
+            asset_class: str (one of equities, rates, fx, commodities, crypto, general)
+            horizon: str (one of intraday, today, week, month)
+            direction: str (one of bullish, bearish, mixed, unknown)
+            confidence: float or None (0.0 to 1.0)
+        """
+        text_lower = text.lower()
+        
+        # 1. Determine asset_class from products
+        if products:
+            # Map first product to asset class
+            first_prod = products[0]
+            asset_class = PRODUCT_TO_ASSET_CLASS.get(first_prod, "GENERAL").lower()
+        else:
+            # Infer from text keywords - ordered by specificity (most specific first)
+            # Check specific commodities
+            if any(kw in text_lower for kw in ["oil", "crude", "opec", "iran", "petroleum", "wti", "brent"]):
+                asset_class = "commodities"
+                if not products:
+                    products = ["CL"]
+            elif any(kw in text_lower for kw in ["gold", "silver", "metals", "precious"]):
+                asset_class = "commodities"
+                if not products:
+                    products = ["GC"]
+            # Check specific FX pairs
+            elif any(kw in text_lower for kw in ["yen", "jpy", "boj", "usdjpy"]):
+                asset_class = "fx"
+                if not products:
+                    products = ["USDJPY"]
+            elif "dollar" in text_lower or "dxy" in text_lower or "usd" in text_lower:
+                asset_class = "fx"
+                if not products:
+                    products = ["DXY"]
+            # Check inflation/jobs - these are cross-asset
+            elif any(kw in text_lower for kw in ["inflation", "cpi", "pce", "jobs", "nfp", "employment", "wage"]):
+                asset_class = "general"  # Affects multiple assets
+                if not products:
+                    products = ["ES", "SPX", "DXY", "US10Y", "GC"]
+            # Check rates-specific keywords
+            elif any(kw in text_lower for kw in ["yields", "treasur", "bond", "10y", "2y", "curve"]):
+                asset_class = "rates"
+                if not products:
+                    products = ["US10Y", "ZN"]
+            elif "fed" in text_lower and any(kw in text_lower for kw in ["hike", "cut", "rate", "fomc", "qe", "qt"]):
+                asset_class = "rates"
+                if not products:
+                    products = ["US10Y", "ZN"]
+            # Check crypto
+            elif any(kw in text_lower for kw in ["bitcoin", "btc", "crypto", "ethereum", "eth"]):
+                asset_class = "crypto"
+                if not products:
+                    products = ["BTC"]
+            # Check equities - broader keywords last
+            elif any(kw in text_lower for kw in ["equities", "stocks", "s&p", "nasdaq", "dow"]):
+                asset_class = "equities"
+                if not products:
+                    products = ["ES", "SPX"]
+            else:
+                asset_class = "general"
+        
+        # 2. Infer horizon
+        if any(kw in text_lower for kw in ["intraday", "today", "session", "open", "close"]):
+            horizon = "intraday"
+        elif any(kw in text_lower for kw in ["tomorrow", "next session", "overnight"]):
+            horizon = "today"
+        elif any(kw in text_lower for kw in ["this week", "weekly", "next week", "days ahead"]):
+            horizon = "week"
+        elif any(kw in text_lower for kw in ["month", "monthly", "quarter", "longer-term"]):
+            horizon = "month"
+        else:
+            horizon = "today"  # Default
+        
+        # 3. Infer direction
+        # Check for explicit "mixed" keyword first
+        if "mixed" in text_lower or "two-sided" in text_lower or "conflicting" in text_lower:
+            direction = "mixed"
+        else:
+            bullish_kws = ["bullish", "upside", "rally", "strength", "support", "positive", "gains", "higher", "rise"]
+            bearish_kws = ["bearish", "downside", "selloff", "weakness", "resistance", "negative", "losses", "lower", "fall", "drop"]
+            
+            has_bullish = any(kw in text_lower for kw in bullish_kws)
+            has_bearish = any(kw in text_lower for kw in bearish_kws)
+            
+            if has_bullish and has_bearish:
+                direction = "mixed"
+            elif has_bullish:
+                direction = "bullish"
+            elif has_bearish:
+                direction = "bearish"
+            else:
+                direction = "unknown"
+        
+        # 4. Confidence (simple heuristic: more specific = higher confidence)
+        confidence = None
+        if len(products) > 0 and direction != "unknown":
+            confidence = 0.7
+        elif len(products) > 0 or direction != "unknown":
+            confidence = 0.5
+        else:
+            confidence = 0.3
+        
+        return {
+            "asset_class": asset_class,
+            "products": products,
+            "horizon": horizon,
+            "direction": direction,
+            "confidence": confidence
+        }
+
     def gather(section: str, limit: int = 30, filter_trade_ideas: bool = False) -> List[dict]:
         """Gather bullets; never default to ALL_PRODUCTS. products=[] → General."""
         out = []
@@ -575,14 +726,42 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
                     provider = a.get("meta", {}).get("provider", "O")
                     sources = it.get("sources", []) or [provider]
                     prods = _resolve_bullet_products(it, text, article_products, section)
-                    out.append({"text": text, "sources": sorted(set(sources)), "products": prods})
+                    
+                    bullet = {"text": text, "sources": sorted(set(sources)), "products": prods}
+                    
+                    # Enrich warnings with additional context
+                    if section == "warnings":
+                        context = _infer_risk_flag_context(text, prods)
+                        bullet.update({
+                            "asset_class": context["asset_class"],
+                            "products": context["products"],  # May have been enriched
+                            "horizon": context["horizon"],
+                            "direction": context["direction"],
+                            "confidence": context["confidence"]
+                        })
+                    
+                    out.append(bullet)
                 elif isinstance(it, str):
                     text = it
                     if filter_trade_ideas and _looks_like_trade_idea(text):
                         continue
                     provider = a.get("meta", {}).get("provider", "O")
                     prods = _resolve_bullet_products({"text": text}, text, article_products, section)
-                    out.append({"text": text, "sources": [provider], "products": prods})
+                    
+                    bullet = {"text": text, "sources": [provider], "products": prods}
+                    
+                    # Enrich warnings with additional context
+                    if section == "warnings":
+                        context = _infer_risk_flag_context(text, prods)
+                        bullet.update({
+                            "asset_class": context["asset_class"],
+                            "products": context["products"],  # May have been enriched
+                            "horizon": context["horizon"],
+                            "direction": context["direction"],
+                            "confidence": context["confidence"]
+                        })
+                    
+                    out.append(bullet)
         out = _dedupe_bullets(out)
         return out[:limit]
 
@@ -773,7 +952,7 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
             "model": _model_from_articles(article_sum_jsons),
         },
         "ui": {
-            "title": f"Preparation for {_format_date_human(date_obj)}",
+            "title": f"Preparation for {_format_date_human(_next_trading_weekday(date_obj))}",
             "header_pills": [
                 _pill(", ".join(providers), "provider"),
                 _pill(date_obj.strftime("%b %d, %Y"), "date"),

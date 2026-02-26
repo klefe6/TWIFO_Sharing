@@ -1,0 +1,302 @@
+================================================================================
+ORIGINAL PDF RESOLUTION FIX - SUMMARY
+================================================================================
+
+PROBLEM
+-------
+Daily View split-screen showed "Original article not available" for most articles
+because it only searched the artifact folder. Original PDFs actually live in the
+shared originals/ folder at:
+C:\Users\H&CDanHughes\Hughes & Company\Hughes & Company - Documents\8_Research\FOLDERS_AVAILABLE_ONLINE\originals
+
+SOLUTION
+--------
+Implemented priority-based PDF resolution that checks:
+1. Artifact folder (for embedded originals)
+2. ORIGINALS_ROOT (shared originals folder)
+3. Fallback message if not found
+
+================================================================================
+IMPLEMENTATION
+================================================================================
+
+1. ADDED CONFIG CONSTANT
+-------------------------
+File: twifo.py (line ~298)
+
+ORIGINALS_ROOT = Path(FILES_DIR) / "originals"
+
+Location: Placed with other path config (FILES_DIR, PATH_MANAGER)
+Value: .../FOLDERS_AVAILABLE_ONLINE/originals
+
+2. REPLACED FUNCTION
+--------------------
+File: twifo.py (lines ~5909-5961)
+
+OLD: _find_original_pdf(artifact_folder)
+     - Only checked artifact folder
+     - Returned None for most articles
+
+NEW: resolve_original_pdf(artifact_folder)
+     - Checks artifact folder first
+     - Then checks ORIGINALS_ROOT
+     - Logs resolution path
+     - Returns relative path or None
+
+3. RESOLUTION STRATEGY
+----------------------
+
+Priority A: Artifact Folder
+  - Try: artifacts/{folder}/original.pdf
+  - Try: artifacts/{folder}/source.pdf
+  - Try: artifacts/{folder}/article.pdf
+  - Try: Any PDF except sum.pdf
+
+Priority B: ORIGINALS_ROOT
+  - Filename: {artifact_folder}.pdf
+  - Example: 20260211__GM__report__abc123.pdf
+  - Path: originals/20260211__GM__report__abc123.pdf
+
+Priority C: Not Found
+  - Return None
+  - Caller shows fallback message
+
+4. LOGGING
+----------
+Format: [ORIGINAL_PDF] id=... tried=... found=...
+
+Examples:
+  [ORIGINAL_PDF] id=20260211__GM__report__abc123 tried=artifact/original.pdf found=yes
+  [ORIGINAL_PDF] id=20260211__BOA__weekly__def456 tried=artifact found=no tried=originals/20260211__BOA__weekly__def456.pdf found=yes
+  [ORIGINAL_PDF] id=20260211__JPM__daily__ghi789 tried=artifact found=no tried=originals/20260211__JPM__daily__ghi789.pdf found=no
+
+Benefits:
+  - One line per article (no spam)
+  - Shows exactly where PDF was found
+  - Easy to debug resolution issues
+
+5. UPDATED SPLIT-SCREEN
+------------------------
+File: twifo.py (line ~6025)
+
+Changed:
+  original_pdf_path = _find_original_pdf(artifact_folder)
+To:
+  original_pdf_path = resolve_original_pdf(artifact_folder)
+
+Impact: Split-screen now shows originals from originals/ folder
+
+================================================================================
+EXAMPLE PATH RESOLUTION
+================================================================================
+
+Scenario: Goldman Sachs Commodity Report
+
+Artifact Folder: 20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa
+
+Resolution Steps:
+
+1. Check artifact folder:
+   - artifacts/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa/original.pdf → Not found
+   - artifacts/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa/source.pdf → Not found
+   - artifacts/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa/*.pdf (except sum.pdf) → Not found
+
+2. Check ORIGINALS_ROOT:
+   - originals/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa.pdf → FOUND
+
+3. Return: "originals/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa.pdf"
+
+Log Output:
+  [ORIGINAL_PDF] id=20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa tried=artifact found=no tried=originals/20260211__GM__gm_commodity_analyst_20260211_u__677f0794fa.pdf found=yes
+
+Result: PDF loads in right pane of split-screen view
+
+================================================================================
+MANUAL TEST STEPS
+================================================================================
+
+TEST 1: Article with Original in ORIGINALS_ROOT
+------------------------------------------------
+Setup:
+  - Find article where artifact folder has sum.json but no original.pdf
+  - Verify corresponding PDF exists in originals/ folder
+
+Steps:
+  1. Start Twifo application
+  2. Navigate to Daily View
+  3. Select date with articles
+  4. Click on individual article (e.g., Goldman Sachs commodity report)
+
+Expected:
+  ✓ Split-screen appears
+  ✓ Left pane shows AI summary
+  ✓ Right pane shows original PDF (loaded from originals/)
+  ✓ Console log shows: tried=artifact found=no tried=originals/...pdf found=yes
+  ✓ PDF renders correctly in iframe
+
+Pass Criteria:
+  - Original PDF displays (not fallback message)
+  - Log confirms PDF found in originals/
+
+TEST 2: Article with Original in Artifact Folder
+-------------------------------------------------
+Setup:
+  - Find article where artifact folder has embedded original.pdf
+
+Steps:
+  1. Navigate to Daily View
+  2. Click on article with embedded original
+
+Expected:
+  ✓ Split-screen appears
+  ✓ Right pane shows original PDF (loaded from artifact folder)
+  ✓ Console log shows: tried=artifact/original.pdf found=yes
+  ✓ No attempt to check originals/ (early return)
+
+Pass Criteria:
+  - Original PDF displays from artifact folder
+  - Log confirms artifact folder was used
+
+TEST 3: Article with No Original Anywhere
+------------------------------------------
+Setup:
+  - Find article where:
+    * Artifact folder has no original PDF
+    * No corresponding PDF in originals/ folder
+
+Steps:
+  1. Navigate to Daily View
+  2. Click on article without original
+
+Expected:
+  ✓ Split-screen appears
+  ✓ Left pane shows AI summary
+  ✓ Right pane shows fallback message: "📄 Original article not available"
+  ✓ Console log shows: tried=artifact found=no tried=originals/...pdf found=no
+
+Pass Criteria:
+  - Fallback message displays (not broken iframe)
+  - Log confirms both locations checked
+
+TEST 4: Daily Summary Unchanged
+--------------------------------
+Steps:
+  1. Navigate to Daily View
+  2. Click "Summary for {date} & Prep for Today" button
+
+Expected:
+  ✓ Full-width rollup renders (no split-screen)
+  ✓ No PDF resolution attempted
+  ✓ No console logs about original PDFs
+  ✓ All sections render normally
+
+Pass Criteria:
+  - Daily Summary completely unchanged
+  - No impact from PDF resolution changes
+
+================================================================================
+FILES CHANGED
+================================================================================
+
+MODIFIED
+--------
+1. twifo.py
+   - Line ~298: Added ORIGINALS_ROOT constant
+   - Lines ~5909-5961: Replaced _find_original_pdf() with resolve_original_pdf()
+   - Line ~6025: Updated call to use resolve_original_pdf()
+
+NOT MODIFIED
+------------
+- rollups.py (unchanged)
+- twifo_app.py (unchanged)
+- path_manager.py (unchanged)
+- All other Python files (unchanged)
+
+================================================================================
+TECHNICAL DETAILS
+================================================================================
+
+FILENAME MAPPING
+----------------
+Artifact Folder Format: YYYYMMDD__PROVIDER__title_slug__hash
+Original PDF Format:    YYYYMMDD__PROVIDER__title_slug__hash.pdf
+
+Mapping: Direct 1:1 (folder name = PDF basename)
+
+Example:
+  Folder: 20260211__GM__commodity_analyst_20260211_u__677f0794fa
+  PDF:    20260211__GM__commodity_analyst_20260211_u__677f0794fa.pdf
+
+WHY THIS WORKS
+--------------
+1. Deterministic: Same naming convention for folders and PDFs
+2. No Parsing: Simple string concatenation ({folder}.pdf)
+3. Reliable: Based on existing pipeline conventions
+4. Fast: Single file check (no directory scanning)
+
+PATH RESOLUTION FLOW
+--------------------
+resolve_original_pdf(artifact_folder)
+    ↓
+Check: artifacts/{folder}/original.pdf
+    ↓ Not found
+Check: artifacts/{folder}/source.pdf
+    ↓ Not found
+Check: artifacts/{folder}/*.pdf (except sum.pdf)
+    ↓ Not found
+Check: originals/{folder}.pdf
+    ↓ FOUND
+Return: "originals/{folder}.pdf"
+
+SECURITY
+--------
+✓ Path Validation: Uses Path objects (safe)
+✓ No User Input: artifact_folder from trusted source
+✓ No Path Traversal: Direct path construction
+✓ File Existence Check: Uses .is_file() before returning
+
+PERFORMANCE
+-----------
+✓ Fast: Simple file existence checks
+✓ Early Return: Stops at first match
+✓ No Overhead: Only runs when user clicks article
+✓ Cached by Browser: PDF loaded once, then cached
+
+BACKWARD COMPATIBILITY
+----------------------
+✓ Artifact Folder Priority: Existing embedded originals still work
+✓ Fallback Message: Graceful handling when PDF not found
+✓ No Breaking Changes: All existing paths still work
+✓ Daily Summary Unchanged: No impact on rollup rendering
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+1. ✓ Diff patch (original_pdf_resolution_fix.patch)
+2. ✓ Implementation doc (ORIGINAL_PDF_RESOLUTION_FIX.md)
+3. ✓ Summary (this file)
+4. ✓ Example path resolution (see above)
+5. ✓ Manual test steps (see above)
+
+================================================================================
+DEPLOYMENT
+================================================================================
+
+✓ No database migrations
+✓ No new dependencies
+✓ No configuration changes
+✓ Backward compatible
+✓ No restart required (Dash hot-reloads)
+
+================================================================================
+STATUS
+================================================================================
+
+Implementation: COMPLETE
+Linter Errors:  NONE
+Manual Testing: PENDING
+Deployment:     READY
+
+================================================================================
+
