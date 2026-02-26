@@ -414,10 +414,30 @@ def _aggregate_volatility_by_asset_class(article_sum_jsons: List[dict]) -> Dict[
     """
     Aggregate volatility_impact and sentiment_indicator by asset class.
     Score: High=3, Medium=2, Low=1. Average across articles.
+    
+    Extended schema (2026-02-25): Adds reference_symbol and bias_definition
+    to disambiguate directional bias for broad asset classes like FX.
     """
     from collections import Counter
     
     VOL_SCORE = {"High": 3, "Medium": 2, "Low": 1}
+    
+    # Canonical reference instrument mapping
+    # Used when no specific instrument is identified from source data.
+    # FX uses DXY because it is the most common vol surface anchor in macro research.
+    # Note: DXY downside implies EURUSD upside (inverse relationship).
+    REFERENCE_MAPPING = {
+        "EQUITIES": "SPX",
+        "FX": "DXY",
+        "RATES": "US10Y",
+        "COMMODITIES": "CL",  # Crude oil as most liquid commodity
+        "METALS": "GC",       # Gold
+        "ENERGY": "CL",
+        "CRYPTO": "BTC",
+        "VOLATILITY": "VIX",
+        "GENERAL": None,      # Too broad for single instrument
+        "CREDIT": None,       # Too broad for single instrument
+    }
     
     # Collect per asset class
     ac_data: Dict[str, dict] = defaultdict(lambda: {
@@ -471,14 +491,47 @@ def _aggregate_volatility_by_asset_class(article_sum_jsons: List[dict]) -> Dict[
         skew_counter = Counter(data["skews"])
         directional_skew = skew_counter.most_common(1)[0][0] if skew_counter else "Neutral"
         
+        # Determine reference symbol and bias definition
+        reference_symbol = REFERENCE_MAPPING.get(ac)
+        bias_definition = _build_bias_definition(ac, reference_symbol, directional_skew)
+        
         result[ac] = {
             "expected_volatility": expected_vol,
             "directional_skew": directional_skew,
             "confidence_score": round(avg_score, 2),
             "sources": sorted(data["sources"]),
+            "reference_symbol": reference_symbol,  # NEW: canonical instrument
+            "bias_definition": bias_definition,    # NEW: tooltip text
         }
     
     return result
+
+
+def _build_bias_definition(asset_class: str, reference_symbol: Optional[str], skew: str) -> str:
+    """
+    Build tooltip text explaining what the directional bias means.
+    
+    Special handling for FX: DXY downside implies EURUSD upside (inverse).
+    """
+    if not reference_symbol:
+        return f"{skew} bias for {asset_class}. No single reference instrument."
+    
+    if asset_class == "FX" and reference_symbol == "DXY":
+        if skew == "Bearish":
+            return "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+        elif skew == "Bullish":
+            return "Bullish bias relative to DXY. If DXY rises, EURUSD tends to fall (USD strength)."
+        else:
+            return "Neutral bias relative to DXY. Mixed signals across currency pairs."
+    
+    # Generic definition for other asset classes
+    direction_text = {
+        "Bearish": "downside",
+        "Bullish": "upside",
+        "Neutral": "neutral"
+    }.get(skew, "mixed")
+    
+    return f"{skew} bias relative to {reference_symbol}. Expected {direction_text} movement."
 
 
 def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_articles_required: int = 3) -> dict:

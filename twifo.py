@@ -2015,32 +2015,6 @@ app.layout = html.Div([
                                                         ]
                                                     ),
                                                     
-                                                    # Dynamics mode toggle (Economic Calendar)
-                                                    html.Div(
-                                                        style={
-                                                            "marginTop": "10px",
-                                                            "marginBottom": "15px",
-                                                            "padding": "8px 10px",
-                                                            "backgroundColor": "#f0f4ff",
-                                                            "borderRadius": "4px",
-                                                            "border": "1px solid #c3d0f0",
-                                                            "fontSize": "12px"
-                                                        },
-                                                        children=[
-                                                            html.Span("Dynamics: ", style={"fontWeight": "600", "marginRight": "6px"}),
-                                                            dcc.RadioItems(
-                                                                id="daily-view-dynamics-toggle",
-                                                                options=[
-                                                                    {"label": " On", "value": True},
-                                                                    {"label": " Off", "value": False},
-                                                                ],
-                                                                value=True,
-                                                                inline=True,
-                                                                labelStyle={"marginRight": "10px", "cursor": "pointer", "fontSize": "12px"},
-                                                            ),
-                                                        ]
-                                                    ),
-                                                    
                                                     html.Div(id="daily-view-article-list")
                                                 ]
                                             ),
@@ -3291,36 +3265,12 @@ def display_page(pathname):
 # ── Dynamics-mode toggle → persist to store ───────────────────────────────────
 @app.callback(
     Output("econ-dynamics-mode", "data"),
-    [
-        Input("econ-dynamics-toggle", "value"),
-        Input("daily-view-dynamics-toggle", "value"),
-    ],
+    Input("econ-dynamics-toggle", "value"),
     prevent_initial_call=True,
 )
-def update_dynamics_mode(admin_value, daily_value):
-    """Sync RadioItems value to session store from either toggle."""
-    triggered = ctx.triggered_id
-    if triggered == "econ-dynamics-toggle":
-        return admin_value
-    elif triggered == "daily-view-dynamics-toggle":
-        return daily_value
-    raise PreventUpdate
-
-
-# ── Sync store back to Daily View toggle on tab switch ────────────────────────
-# NOTE: Uses State for econ-dynamics-mode to avoid circular dependency.
-# The sync only triggers when tab changes, not when the store changes.
-@app.callback(
-    Output("daily-view-dynamics-toggle", "value"),
-    Input("main-tabs", "value"),
-    State("econ-dynamics-mode", "data"),
-    prevent_initial_call=True,
-)
-def sync_daily_view_toggle(tab_value, mode_value):
-    """Ensure Daily View toggle reflects the session store when tab opens."""
-    if tab_value == "daily-view":
-        return mode_value if mode_value is not None else True
-    raise PreventUpdate
+def update_dynamics_mode(admin_value):
+    """Sync RadioItems value to session store from Economic Calendar toggle."""
+    return admin_value
 
 
 # ── On-demand Theory explainer ────────────────────────────────────────────────
@@ -5596,19 +5546,59 @@ def render_rollup_summary(rollup_json: dict, article_count: int, dynamics_mode: 
     vol_by_ac = sections.get("volatility_by_asset_class", {})
     vol_body: list = []
     if vol_by_ac:
+        # Canonical reference mapping for backward compatibility with old rollups
+        # that don't have reference_symbol field
+        FALLBACK_REFERENCE = {
+            "EQUITIES": "SPX",
+            "FX": "DXY",
+            "RATES": "US10Y",
+            "COMMODITIES": "CL",
+            "METALS": "GC",
+            "ENERGY": "CL",
+            "CRYPTO": "BTC",
+            "VOLATILITY": "VIX",
+            "GENERAL": None,
+            "CREDIT": None,
+        }
+        
         for ac, vol_data in vol_by_ac.items():
             ev = vol_data.get("expected_volatility", "?")
             skew = vol_data.get("directional_skew", "Neutral")
             conf = vol_data.get("confidence_score", 0)
+            reference_symbol = vol_data.get("reference_symbol")  # NEW field
+            bias_definition = vol_data.get("bias_definition", "")  # NEW field
+            
+            # Fallback to canonical mapping if reference_symbol missing (old rollups)
+            if reference_symbol is None and ac in FALLBACK_REFERENCE:
+                reference_symbol = FALLBACK_REFERENCE[ac]
+                # Build fallback bias definition
+                if reference_symbol:
+                    if ac == "FX" and reference_symbol == "DXY":
+                        if skew == "Bearish":
+                            bias_definition = "Bearish bias relative to DXY. If DXY falls, EURUSD tends to rise (USD weakness)."
+                        elif skew == "Bullish":
+                            bias_definition = "Bullish bias relative to DXY. If DXY rises, EURUSD tends to fall (USD strength)."
+                        else:
+                            bias_definition = "Neutral bias relative to DXY. Mixed signals across currency pairs."
+                    else:
+                        direction_text = {"Bearish": "downside", "Bullish": "upside", "Neutral": "neutral"}.get(skew, "mixed")
+                        bias_definition = f"{skew} bias relative to {reference_symbol}. Expected {direction_text} movement."
+                else:
+                    bias_definition = f"{skew} bias for {ac}. No single reference instrument."
+            
             ev_color = (
                 "#dc3545" if ev == "High" else
                 "#ffc107" if ev == "Medium" else
                 "#28a745"
             )
             skew_arrow = "↗️" if skew == "Bullish" else ("↘️" if skew == "Bearish" else "↔️")
+            
+            # Build asset class label with reference symbol
+            ac_label = f"{ac} ({reference_symbol})" if reference_symbol else ac
+            
             vol_body.append(html.Div(
                 [
-                    html.Span(ac, style={"fontWeight": "600", "minWidth": "110px", "display": "inline-block", "fontSize": "13px"}),
+                    html.Span(ac_label, style={"fontWeight": "600", "minWidth": "140px", "display": "inline-block", "fontSize": "13px"}),
                     html.Span(
                         ev,
                         style={
@@ -5853,15 +5843,17 @@ def render_rollup_sections_detail(sections: dict, date_str: str = "", rollup_jso
         Output("daily-selected-artifact", "data"),
         Output("daily-view-content", "children")
     ],
-    Input({"type": "daily-article-btn", "index": dash.dependencies.ALL}, "n_clicks"),
     [
-        State("daily-articles-store", "data"),
-        State("econ-dynamics-mode", "data"),
+        Input({"type": "daily-article-btn", "index": dash.dependencies.ALL}, "n_clicks"),
+        Input("daily-articles-store", "data")
+    ],
+    [
         State("login-user", "data"),
+        State("daily-view-date-input", "value")
     ],
     prevent_initial_call=True
 )
-def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store, login_user_store):
+def display_daily_article_summary(n_clicks_list, artifacts, login_user_store, date_input):
     """
     Render the right-panel content for the selected artifact folder.
 
@@ -5869,6 +5861,8 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
       1. has_sum_json  → load JSON and render web summary
       2. has_sum_pdf   → embed PDF via iframe
       3. neither       → show clear message with missing paths
+    
+    Also clears the right panel when artifacts store updates with empty data.
     """
     if not ctx.triggered:
         raise PreventUpdate
@@ -5877,6 +5871,46 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
     if not triggered_id:
         raise PreventUpdate
 
+    # Check if triggered by store update (not button click)
+    if triggered_id == "daily-articles-store":
+        # Store updated - check if artifacts is empty
+        if not artifacts or len(artifacts) == 0:
+            # Clear right panel with empty state
+            # Extract date for the empty state message
+            try:
+                if date_input and date_input.strip():
+                    target_date = datetime.datetime.strptime(date_input.strip(), "%Y-%m-%d").date()
+                else:
+                    target_date = datetime.date.today() - datetime.timedelta(days=1)
+                date_display = target_date.strftime("%B %d, %Y")
+            except:
+                target_date = datetime.date.today() - datetime.timedelta(days=1)
+                date_display = target_date.strftime("%B %d, %Y")
+            
+            return "", html.Div([
+                html.Div([
+                    html.H3("No Articles Found", style={"color": HEADER_BG_COLOR, "marginBottom": "10px"}),
+                    html.P(
+                        f"No articles found for {date_display}.",
+                        style={"fontSize": "15px", "marginBottom": "5px"}
+                    ),
+                    html.P(
+                        "Select a different date or check if articles have been ingested.",
+                        style={"fontSize": "13px", "color": "#666", "fontStyle": "italic"}
+                    )
+                ], style={
+                    "backgroundColor": "#f9f9f9",
+                    "padding": "20px",
+                    "borderRadius": "4px",
+                    "border": "1px solid #ddd",
+                    "textAlign": "center",
+                    "marginTop": "40px"
+                })
+            ], style={"padding": "20px"})
+        else:
+            # Artifacts exist but no button clicked yet - don't update
+            raise PreventUpdate
+    
     folder_key = triggered_id.get("index")
 
     # --- Daily Summary - load and render rollup ---
@@ -5897,16 +5931,16 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
         
         # Handle explicit empty state when no articles exist
         if not artifacts or len(artifacts) == 0:
-            _dyn_mode_empty = dynamics_mode_store if dynamics_mode_store is not None else True
             _is_logged_in_empty = bool(login_user_store)
             _live_events_panel_empty = None
             
             # Economic Events panel can still render even without articles
+            # Daily View always renders with dynamics ON (no toggle)
             if date_fmt and ECON_CALENDAR_AVAILABLE:
                 try:
                     _live_events_panel_empty = _render_econ_events_panel(
                         date_fmt, None,
-                        dynamics_mode=_dyn_mode_empty,
+                        dynamics_mode=True,
                         is_logged_in=_is_logged_in_empty,
                     )
                 except Exception:
@@ -5955,12 +5989,11 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
                     except:
                         rollup_json["meta"]["date"] = date_fmt
                 
-                # Render rollup summary (dynamics_mode from session store; default True)
-                _dyn_mode = dynamics_mode_store if dynamics_mode_store is not None else True
+                # Render rollup summary (Daily View always uses dynamics ON)
                 _is_logged_in = bool(login_user_store)
                 content = render_rollup_summary(
                     rollup_json, len(artifacts),
-                    dynamics_mode=_dyn_mode,
+                    dynamics_mode=True,
                     is_logged_in=_is_logged_in,
                 )
                 return "", content
@@ -5981,7 +6014,7 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
         else:
             # Rollup doesn't exist — show helpful message plus live events from SQLite.
             # The events panel is a pure DB read; no LLM is called here.
-            _dyn_mode_no_rollup = dynamics_mode_store if dynamics_mode_store is not None else True
+            # Daily View always renders with dynamics ON (no toggle)
             _date_iso_no_rollup = date_fmt if date_fmt else None
             _is_logged_in_no_rollup = bool(login_user_store)
             _live_events_panel = None
@@ -5989,7 +6022,7 @@ def display_daily_article_summary(n_clicks_list, artifacts, dynamics_mode_store,
                 try:
                     _live_events_panel = _render_econ_events_panel(
                         _date_iso_no_rollup, None,
-                        dynamics_mode=_dyn_mode_no_rollup,
+                        dynamics_mode=True,
                         is_logged_in=_is_logged_in_no_rollup,
                     )
                 except Exception:
