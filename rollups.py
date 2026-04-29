@@ -23,14 +23,17 @@ ROLLUP_SCHEMA_V1 = "twifo.rollup.v1"
 
 # Product codes for filtering and grouping
 PRODUCT_CODES = [
-    "NQ", "Dow", "ES", "GC", "SI", "ZN", "BTC", "CL", "NG", "HG",
+    "NQ", "Dow", "ES", "GC", "SI", "PL", "PA", "ZN", "BTC", "CL", "NG", "HG",
     "ZC", "ZS", "ZW", "HO", "RB", "RTY", "VIX", "EUR", "GBP", "JPY",
-    "CHF", "AUD", "CAD", "ZB", "ZF", "ZT", "TN", "UB"
+    "CHF", "AUD", "CAD", "ZB", "ZF", "ZT", "TN", "UB",
+    "GLD", "SLV", "USO", "XAUUSD",
 ]
 
 # Asset classes (ordered for grouping)
+# METALS and ENERGY are explicit sub-classes; COMMODITIES is kept as fallback for
+# agricultural / base-metal items that don't fit either bucket.
 ASSET_CLASSES = [
-    "EQUITIES", "RATES", "COMMODITIES", "FX",
+    "EQUITIES", "RATES", "METALS", "ENERGY", "COMMODITIES", "FX",
     "VOLATILITY", "CRYPTO", "CREDIT", "GENERAL"
 ]
 
@@ -45,13 +48,23 @@ PRODUCT_TO_ASSET_CLASS = {
     "ZN": "RATES", "ZB": "RATES", "ZF": "RATES", "ZT": "RATES", "TN": "RATES", "UB": "RATES",
     "TIPS": "RATES",     # US TIPS index / ETF — macro rates instrument
     "UST": "RATES",      # Generic US Treasury reference
-    # Commodities (futures + widely-used commodity ETFs)
-    "GC": "COMMODITIES", "SI": "COMMODITIES", "CL": "COMMODITIES", "NG": "COMMODITIES",
-    "HG": "COMMODITIES", "ZC": "COMMODITIES", "ZS": "COMMODITIES", "ZW": "COMMODITIES",
-    "HO": "COMMODITIES", "RB": "COMMODITIES",
-    "SLV": "COMMODITIES",  # Silver ETF — NOT an equity
-    "GLD": "COMMODITIES",  # Gold ETF — NOT an equity
-    "USO": "COMMODITIES",  # Oil ETF — NOT an equity
+    # Precious metals → METALS  (gold, silver, platinum, palladium)
+    "GC": "METALS",      # Gold futures
+    "SI": "METALS",      # Silver futures
+    "PL": "METALS",      # Platinum futures
+    "PA": "METALS",      # Palladium futures
+    "GLD": "METALS",     # Gold ETF
+    "SLV": "METALS",     # Silver ETF
+    "XAUUSD": "METALS",  # Spot gold FX notation
+    # Energy → ENERGY
+    "CL": "ENERGY",      # Crude oil (WTI)
+    "NG": "ENERGY",      # Natural gas
+    "HO": "ENERGY",      # Heating oil
+    "RB": "ENERGY",      # RBOB Gasoline
+    "USO": "ENERGY",     # Oil ETF
+    # Other commodities (ags, base metals) — keep as COMMODITIES
+    "HG": "COMMODITIES", # Copper (base metal, industrial)
+    "ZC": "COMMODITIES", "ZS": "COMMODITIES", "ZW": "COMMODITIES",  # Grains
     # FX
     "EUR": "FX", "GBP": "FX", "JPY": "FX", "CHF": "FX", "AUD": "FX", "CAD": "FX",
     "DXY": "FX",         # Dollar Index
@@ -126,6 +139,34 @@ def _looks_like_trade_idea(text: str) -> bool:
             return True
     return False
 
+
+def _is_analyst_rating_noise(text: str) -> bool:
+    """
+    Detect low-value analyst rating calls that provide zero market context
+    and should be excluded from consensus_catalysts and rollup content.
+
+    Examples of noise:
+      "Maintain Neutral rating due to execution concerns in HDI business."
+      "Reiterate Buy rating on strong earnings."
+      "Downgrade to Sell on valuation."
+      "Upgrade to Overweight; target raised to $X."
+
+    These are equity-analyst opinions on individual stocks — no context for
+    a macro/futures trader reading the rollup.
+    """
+    text_lower = text.lower()
+    # Pattern: maintain/reiterate/initiate/downgrade/upgrade + rating keyword
+    rating_patterns = [
+        r'\b(maintain|reiterate|reaffirm|initiate|reinstate)\b.{0,40}\b(buy|sell|neutral|hold|overweight|underweight|outperform|underperform|market.?perform)\b',
+        r'\b(downgrade|upgrade)\b.{0,40}\b(buy|sell|neutral|hold|overweight|underweight|outperform|underperform|market.?perform)\b',
+        r'\b(buy|sell|neutral|hold|overweight|underweight|outperform|underperform)\s+(rating|recommendation)\b',
+        r'\bprice\s+target\b.{0,20}\$\d',   # "price target cut to $X" with no market context
+    ]
+    for pattern in rating_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
 def _iso_now() -> str:
     """Return timezone-aware ISO-8601 (UTC) e.g. 2026-02-04T21:37:36Z."""
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -150,7 +191,8 @@ def write_txt(p: Path, text: str) -> None:
     p.write_text(text.strip() + "\n", encoding="utf-8")
 
 def _format_date_human(d: dt.date) -> str:
-    return d.strftime("%B %d, %Y")
+    """Human date for rollup UI title, e.g. Monday, April 21, 2026."""
+    return d.strftime("%A, %B %d, %Y")
 
 def _next_trading_weekday(d: dt.date) -> dt.date:
     """
@@ -264,23 +306,34 @@ def _rank_trade_ideas(trades: List[dict]) -> List[dict]:
 # Bucket for unassigned bullets (products=[]). Never use ALL_PRODUCTS.
 GENERAL_BUCKET = "General"
 
-# Keyword → product mapping for inferring products from bullet text
+# Keyword → product mapping for inferring products from bullet text.
+# Precious metals (GC/SI/PL/PA) are listed before energy (CL/NG) so gold/silver
+# text is never misclassified as ENERGY.
 _KEYWORD_TO_PRODUCT: List[Tuple[str, str]] = [
-    (r"\boil\b|\bcrude\b", "CL"),
-    (r"\bgold\b", "GC"),
-    (r"\bsilver\b", "SI"),
+    # Precious metals — must come before generic "commodity" patterns
+    (r"\bgold\b|\bXAU\b|\bXAUUSD\b|\bprecious metals?\b", "GC"),
+    (r"\bsilver\b|\bXAG\b", "SI"),
+    (r"\bplatinum\b|\bXPT\b", "PL"),
+    (r"\bpalladium\b|\bXPD\b", "PA"),
+    # Energy
+    (r"\boil\b|\bcrude\b|\bWTI\b|\bBrent\b|\bpetroleum\b|\bOPEC\b|\biron\b", "CL"),
+    (r"\bnatural gas\b|\bNat\.?\s*Gas\b|\bLNG\b|\bNG\b", "NG"),
+    (r"\bgasoline\b|\brbob\b", "RB"),
+    (r"\bheating oil\b", "HO"),
+    # Rates
     (r"\bbonds?\b|\bTreasury\b|\byields?\b|\b10[- ]?[yY]ear\b|\b2[- ]?[yY]ear\b", "ZN"),
     (r"\bZB\b|\b30[- ]?[yY]ear\b", "ZB"),
-    (r"\bequities?\b|\bS&P\b|\bSPX\b|\bES\b", "ES"),
+    # Equity indices
+    (r"\bS&P\b|\bSPX\b", "ES"),
     (r"\bNasdaq\b|\bNQ\b", "NQ"),
+    # Volatility / crypto
     (r"\bvolatility\b|\bVIX\b", "VIX"),
     (r"\bbitcoin\b|\bcrypto\b|\bBTC\b", "BTC"),
+    # Ticker-symbol fallbacks (must be last — broad matches)
     (r"\bCL\b", "CL"),
     (r"\bGC\b", "GC"),
     (r"\bSI\b", "SI"),
     (r"\bZN\b", "ZN"),
-    (r"\bES\b", "ES"),
-    (r"\bNQ\b", "NQ"),
 ]
 
 
@@ -296,20 +349,31 @@ def _infer_products_from_text(text: str, section: str, article_products: List[st
     found: set[str] = set()
     for pattern, product in _KEYWORD_TO_PRODUCT:
         if re.search(pattern, text_lower, re.IGNORECASE):
-            if product in PRODUCT_CODES:
-                found.add(product)
-    # Section hints: metals→GC/SI, energy→CL, rates→ZN/ZB, vol→VIX, crypto→BTC
+            # PL/PA not in legacy PRODUCT_CODES — include anyway since we now track them
+            found.add(product)
+
+    # Section hints: metals→GC/SI/PL/PA, energy→CL/NG, rates→ZN/ZB
     if "metals" in section.lower() or "metal" in section.lower():
-        for p in ("GC", "SI"):
-            if p in article_products and any(k in text_lower for k in ["gold", "silver", "gc", "si"]):
+        for p in ("GC", "SI", "PL", "PA"):
+            if any(k in text_lower for k in ["gold", "silver", "platinum", "palladium", "precious", "xau"]):
                 found.add(p)
-    if "energy" in section.lower() and any(k in text_lower for k in ["oil", "crude", "cl"]):
-        if "CL" in article_products:
-            found.add("CL")
+                break
+    if "energy" in section.lower():
+        for kw, p in [
+            (["oil", "crude", "wti", "brent", "opec"], "CL"),
+            (["natural gas", "lng", "nat gas"], "NG"),
+            (["gasoline", "rbob"], "RB"),
+        ]:
+            if any(k in text_lower for k in kw):
+                found.add(p)
     if "rates" in section.lower() or "bonds" in section.lower():
         for p in ("ZN", "ZB"):
             if p in article_products and any(k in text_lower for k in ["yield", "bond", "zn", "zb"]):
                 found.add(p)
+
+    # Filter to products we know about (either in PRODUCT_TO_ASSET_CLASS or PRODUCT_CODES)
+    _known = set(PRODUCT_TO_ASSET_CLASS.keys()) | set(PRODUCT_CODES)
+    found = {p for p in found if p in _known}
     return sorted(found) if found else []
 
 
@@ -619,14 +683,16 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
         else:
             # Infer from text keywords - ordered by specificity (most specific first)
             # Check specific commodities
-            if any(kw in text_lower for kw in ["oil", "crude", "opec", "iran", "petroleum", "wti", "brent"]):
-                asset_class = "commodities"
-                if not products:
-                    products = ["CL"]
-            elif any(kw in text_lower for kw in ["gold", "silver", "metals", "precious"]):
-                asset_class = "commodities"
+            if any(kw in text_lower for kw in ["gold", "silver", "platinum", "palladium",
+                                                "xau", "precious metals", "precious metal"]):
+                asset_class = "metals"
                 if not products:
                     products = ["GC"]
+            elif any(kw in text_lower for kw in ["oil", "crude", "opec", "iran", "petroleum", "wti", "brent",
+                                                  "natural gas", "lng", "gasoline", "rbob"]):
+                asset_class = "energy"
+                if not products:
+                    products = ["CL"]
             # Check specific FX pairs
             elif any(kw in text_lower for kw in ["yen", "jpy", "boj", "usdjpy"]):
                 asset_class = "fx"
@@ -900,10 +966,12 @@ def build_daily_rollup(date_obj: dt.date, article_sum_jsons: List[dict], min_art
     )
 
     # Derive consensus catalysts (from common catalysts in trade ideas)
+    # Filter out analyst rating noise (e.g. "Maintain Neutral rating due to...")
+    # which has zero context for a macro/futures trader reading the rollup.
     all_catalysts = []
     for entry in trade_ideas_list:
         catalyst = entry.get("catalyst", "")
-        if catalyst:
+        if catalyst and not _is_analyst_rating_noise(catalyst):
             all_catalysts.append(catalyst)
     # Simple approach: take most common catalysts (could be enhanced)
     consensus_catalysts = [{"text": c, "sources": []} for c in all_catalysts[:3]]
